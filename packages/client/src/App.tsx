@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import './App.css'
+import './index.css'
 
 function App() {
   const [message, setMessage] = useState("");
@@ -10,7 +10,7 @@ function App() {
       .then((data) => setMessage(data.message));
   }, []);
 
-  return <p>{message}</p>
+  return <p className='text-3xl'>{message}</p>
 
 }
 
