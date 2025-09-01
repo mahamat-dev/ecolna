@@ -4,7 +4,7 @@ import { validate } from '../../middlewares/validate';
 import { requireAdmin } from '../../middlewares/rbac';
 import { enrollment, guardianStudent } from '../../db/schema/enrollment';
 import { classSection, academicYear } from '../../db/schema/academics';
-import { profiles } from '../../db/schema/identity';
+import { profiles, userRoles } from '../../db/schema/identity';
 import {
   EnrollDto, TransferDto, WithdrawDto, GraduateDto,
   SetRollNoDto, LinkGuardianDto, UnlinkGuardianDto
@@ -228,10 +228,13 @@ router.get('/class-sections/:id/students', async (req, res) => {
   const sectionId = req.params.id;
   const rows = await db
     .select({
+      id: enrollment.studentProfileId, // for client compatibility
       studentProfileId: enrollment.studentProfileId,
+      enrollmentId: enrollment.id,
       rollNo: enrollment.rollNo,
       firstName: profiles.firstName,
       lastName: profiles.lastName,
+      userId: profiles.userId,
     })
     .from(enrollment)
     .leftJoin(profiles, eq(profiles.id, enrollment.studentProfileId))
@@ -340,6 +343,74 @@ router.get('/guardians/:profileId/students', async (req, res) => {
   const rows = await db.select().from(guardianStudent)
     .where(eq(guardianStudent.guardianProfileId, guardianId));
   res.json(rows);
+});
+
+// Get all students (profiles with STUDENT role)
+router.get('/students', async (req, res) => {
+  const students = await db.select({
+    id: profiles.id,
+    firstName: profiles.firstName,
+    lastName: profiles.lastName,
+    phone: profiles.phone,
+    userId: profiles.userId,
+    rollNo: enrollment.rollNo
+  })
+  .from(profiles)
+  .innerJoin(userRoles, eq(userRoles.userId, profiles.userId))
+  .leftJoin(enrollment, and(
+    eq(enrollment.studentProfileId, profiles.id),
+    eq(enrollment.status, 'ACTIVE')
+  ))
+  .where(eq(userRoles.role, 'STUDENT'));
+  
+  res.json(students);
+});
+
+// Get all guardians (profiles with GUARDIAN role)
+router.get('/guardians', async (req, res) => {
+  const guardians = await db.select({
+    id: profiles.id,
+    firstName: profiles.firstName,
+    lastName: profiles.lastName,
+    phone: profiles.phone,
+    userId: profiles.userId
+  })
+  .from(profiles)
+  .innerJoin(userRoles, eq(userRoles.userId, profiles.userId))
+  .where(eq(userRoles.role, 'GUARDIAN'));
+  
+  res.json(guardians);
+});
+
+// Get all guardian-student links
+router.get('/links/guardian-student', async (req, res) => {
+  const links = await db.select({
+    guardianProfileId: guardianStudent.guardianProfileId,
+    studentProfileId: guardianStudent.studentProfileId,
+    linkType: guardianStudent.linkType,
+    isPrimary: guardianStudent.isPrimary
+  })
+  .from(guardianStudent);
+  
+  res.json(links);
+});
+
+// Get all enrollments
+router.get('/enrollments', async (req, res) => {
+  const enrollments = await db.select({
+    id: enrollment.id,
+    studentProfileId: enrollment.studentProfileId,
+    classSectionId: enrollment.classSectionId,
+    academicYearId: enrollment.academicYearId,
+    status: enrollment.status,
+    joinedOn: enrollment.joinedOn,
+    exitedOn: enrollment.exitedOn,
+    exitReason: enrollment.exitReason,
+    rollNo: enrollment.rollNo
+  })
+  .from(enrollment);
+  
+  res.json(enrollments);
 });
 
 export default router;

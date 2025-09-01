@@ -17,9 +17,9 @@ export async function createAdmin(email:string, password:string, firstName:strin
   return { userId: result.u.id, profileId: result.p.id };
 }
 
-export async function createNonAdmin(role:'STUDENT'|'GUARDIAN'|'STAFF'|'TEACHER', firstName:string, lastName:string, phone?:string){
+export async function createNonAdmin(role:'STUDENT'|'GUARDIAN'|'STAFF'|'TEACHER', firstName:string, lastName:string, phone?:string, password?:string){
   const loginId = makeLoginId(role);
-  const secret = randomSecret(12);
+  const secret = password || randomSecret(12);
   const passwordHash = await argon2Hash(secret);
 
   const result = await db.transaction(async tx => {
@@ -30,7 +30,7 @@ export async function createNonAdmin(role:'STUDENT'|'GUARDIAN'|'STAFF'|'TEACHER'
     if (!p) throw new Error('Failed to create profile');
     return { u, p };
   });
-  return { userId: result.u.id, profileId: result.p.id, loginId, secret };
+  return { userId: result.u.id, profileId: result.p.id, loginId, secret: password ? undefined : secret };
 }
 
 export async function verifyEmailLogin(email:string, password:string){

@@ -11,10 +11,20 @@ export const IdLoginDto = z.object({
 export const CreateUserDto = z.object({
   role: z.enum(['ADMIN','STAFF','TEACHER','STUDENT','GUARDIAN']),
   email: z.string().email().optional(),
-  password: z.string().min(8).optional(),
+  password: z.string().min(6).optional(),
   firstName: z.string().min(1),
   lastName: z.string().min(1),
   phone: z.string().optional(),
+}).refine((data) => {
+  // Admin users require email and password (min 8 chars)
+  if (data.role === 'ADMIN') {
+    return data.email && data.password && data.password.length >= 8;
+  }
+  // Non-admin users require password (min 6 chars)
+  return data.password && data.password.length >= 6;
+}, {
+  message: "Admin users require email and password (min 8 chars). Non-admin users require password (min 6 chars).",
+  path: ['password']
 });
 export const UpdateStatusDto = z.object({ isActive: z.boolean() });
 

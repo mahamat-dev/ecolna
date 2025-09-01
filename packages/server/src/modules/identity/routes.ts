@@ -46,7 +46,7 @@ identityRouter.post('/admin/users', requireAdmin, validate(CreateUserDto), async
     const out = await svc.createAdmin(email, password, firstName, lastName, phone);
     return res.status(201).json({ ...out, email });
   } else {
-    const out = await svc.createNonAdmin(role, firstName, lastName, phone);
+    const out = await svc.createNonAdmin(role, firstName, lastName, phone, password);
     return res.status(201).json(out);
   }
 });

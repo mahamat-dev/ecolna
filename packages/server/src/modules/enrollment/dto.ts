@@ -21,7 +21,7 @@ export const WithdrawDto = z.object({
   studentProfileId: z.string().uuid(),
   classSectionId: z.string().uuid(),
   academicYearId: z.string().uuid(),
-  exitedOn: z.coerce.date(),
+  exitedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   reason: z.string().max(200).optional(),
 });
 

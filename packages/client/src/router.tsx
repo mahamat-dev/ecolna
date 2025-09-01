@@ -1,0 +1,153 @@
+import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { Providers } from '@/providers';
+import { SignIn } from '@/pages/auth/SignIn';
+import Dashboard from '@/pages/Dashboard';
+import { UsersList } from '@/pages/identity/UsersList';
+import { UserCreate } from '@/pages/identity/UserCreate';
+import { UserDetail } from '@/pages/identity/UserDetail';
+import { Stages } from '@/pages/academics/Stages';
+import { GradeLevels } from '@/pages/academics/GradeLevels';
+import { Subjects } from '@/pages/academics/Subjects';
+import { Sections } from '@/pages/academics/Sections';
+import { Enrollments } from '@/pages/enrollment/Enrollments';
+import { GuardianLinks } from '@/pages/enrollment/GuardianLinks';
+import { Assignments } from '@/pages/teaching/Assignments';
+import { Sessions } from '@/pages/attendance/Sessions';
+import { TakeAttendance } from '@/pages/attendance/TakeAttendance';
+import { AuditTimeline } from '@/pages/audit/AuditTimeline';
+import { Profile } from '@/pages/Profile';
+import { AuthGuard, RoleGuard } from '@/guards';
+import { AppShell } from '@/shell/AppShell';
+
+const router = createBrowserRouter([
+  { path: '/sign-in', element: <SignIn /> },
+  {
+    path: '/',
+    element: (
+      <AuthGuard>
+        <AppShell />
+      </AuthGuard>
+    ),
+    children: [
+      { index: true, element: <Dashboard /> },
+      { path: 'profile', element: <Profile /> },
+      {
+        path: 'identity/users',
+        element: (
+          <RoleGuard roles={["ADMIN"]}>
+            <UsersList />
+          </RoleGuard>
+        ),
+      },
+      {
+         path: 'identity/users/create',
+         element: (
+           <RoleGuard roles={["ADMIN"]}>
+             <UserCreate />
+           </RoleGuard>
+         ),
+       },
+       {
+          path: 'identity/users/:id',
+          element: (
+            <RoleGuard roles={["ADMIN"]}>
+              <UserDetail />
+            </RoleGuard>
+          ),
+        },
+        // Academics routes
+        {
+          path: 'academics/stages',
+          element: (
+            <RoleGuard roles={["ADMIN"]}>
+              <Stages />
+            </RoleGuard>
+          ),
+        },
+        {
+          path: 'academics/grade-levels',
+          element: (
+            <RoleGuard roles={["ADMIN"]}>
+              <GradeLevels />
+            </RoleGuard>
+          ),
+        },
+        {
+          path: 'academics/subjects',
+          element: (
+            <RoleGuard roles={["ADMIN"]}>
+              <Subjects />
+            </RoleGuard>
+          ),
+        },
+        {
+           path: 'academics/sections',
+           element: (
+             <RoleGuard roles={["ADMIN"]}>
+               <Sections />
+             </RoleGuard>
+           ),
+         },
+         // Enrollment routes
+         {
+           path: 'enrollment',
+           element: (
+             <RoleGuard roles={["ADMIN", "STAFF"]}>
+               <Enrollments />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'enrollment/guardians',
+           element: (
+             <RoleGuard roles={["ADMIN", "STAFF"]}>
+               <GuardianLinks />
+             </RoleGuard>
+           ),
+         },
+         // Teaching routes
+         {
+           path: 'teaching/assignments',
+           element: (
+             <RoleGuard roles={["ADMIN"]}>
+               <Assignments />
+             </RoleGuard>
+           ),
+         },
+         // Attendance routes
+         {
+           path: 'attendance/sessions',
+           element: (
+             <RoleGuard roles={["ADMIN", "STAFF"]}>
+               <Sessions />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'attendance/take',
+           element: (
+             <RoleGuard roles={["ADMIN", "STAFF"]}>
+               <TakeAttendance />
+             </RoleGuard>
+           ),
+         },
+         // Audit route
+         {
+           path: 'audit',
+           element: (
+             <RoleGuard roles={["ADMIN"]}>
+               <AuditTimeline />
+             </RoleGuard>
+           ),
+         },
+    ],
+  },
+]);
+
+export function AppRouter() {
+  return (
+    <Providers>
+      <RouterProvider router={router} />
+    </Providers>
+  );
+}

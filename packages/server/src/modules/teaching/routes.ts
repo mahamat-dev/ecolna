@@ -176,6 +176,22 @@ router.get('/class-sections/:id/homeroom', async (req, res) => {
   res.json(rows);
 });
 
+// Get all teachers (profiles with TEACHER role)
+router.get('/teachers', async (req, res) => {
+  const teachers = await db.select({
+    id: profiles.id,
+    firstName: profiles.firstName,
+    lastName: profiles.lastName,
+    phone: profiles.phone,
+    userId: profiles.userId
+  })
+  .from(profiles)
+  .innerJoin(userRoles, eq(userRoles.userId, profiles.userId))
+  .where(eq(userRoles.role, 'TEACHER'));
+  
+  res.json(teachers);
+});
+
 /* ----- Teacher self-view endpoints ----- */
 const teacherRouter = Router();
 teacherRouter.use(requireAuth);
