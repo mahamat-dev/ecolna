@@ -5,16 +5,35 @@
    "private": true,
    "scripts": {
       "start": "bun index.ts",
-      "dev": "bun --watch index.ts"
+      "dev": "bun --watch index.ts",
+      "db:generate": "bunx drizzle-kit generate",
+      "db:gen": "bunx drizzle-kit generate",
+      "db:migrate": "bunx drizzle-kit migrate",
+      "db:studio": "bunx drizzle-kit studio",
+      "seed:admin": "bunx tsx scripts/seed_admin.ts"
    },
    "devDependencies": {
       "@types/bun": "latest",
-      "@types/express": "^5.0.3"
+      "@types/express": "^5.0.3",
+      "@types/express-session": "^1.18.0",
+      "drizzle-kit": "^0.31.4",
+      "tsx": "^4.19.1"
    },
    "peerDependencies": {
       "typescript": "^5"
    },
    "dependencies": {
-      "express": "^5.1.0"
+      "@node-rs/argon2": "^2.0.1",
+      "connect-redis": "^7.1.1",
+      "cors": "^2.8.5",
+      "dotenv": "^16.4.5",
+      "drizzle-orm": "^0.44.5",
+      "express": "^5.1.0",
+      "express-session": "^1.17.3",
+      "ioredis": "^5.3.2",
+      "morgan": "^1.10.0",
+      "postgres": "^3.4.7",
+      "rate-limiter-flexible": "^5.0.3",
+      "zod": "^3.23.8"
    }
 }
