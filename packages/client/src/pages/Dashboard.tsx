@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { get } from '@/lib/api';
 import { useNavigate } from 'react-router-dom';
 import { Users, GraduationCap, BookOpen, Calendar, TrendingUp, UserPlus, FileText, Clock } from 'lucide-react';
+import { useNotesList } from '@/modules/content/hooks';
 
 interface DashboardMetrics {
   totalUsers: number;
@@ -56,6 +57,9 @@ export default function Dashboard() {
       } as DashboardMetrics;
     },
   });
+
+  // Recent content (notes)
+  const { data: notesData, isLoading: notesLoading } = useNotesList({ limit: 5 });
 
   // Simulate recent activity data
   const { data: recentActivity } = useQuery({
@@ -214,6 +218,60 @@ export default function Dashboard() {
           </div>
           <div className="mt-4 flex items-center">
             <span className="text-sm text-gray-600 dark:text-gray-400">Actives</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Notes récentes */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-1">Notes récentes</h2>
+          <p className="text-sm text-gray-600 dark:text-gray-400">Derniers contenus publiés ou brouillons</p>
+        </div>
+        <div className="p-6">
+          {notesLoading ? (
+            <p className="text-sm text-gray-600 dark:text-gray-400">Chargement…</p>
+          ) : (
+            <div className="space-y-3">
+              {(notesData?.items || []).length === 0 ? (
+                <p className="text-sm text-gray-600 dark:text-gray-400">Aucune note pour le moment</p>
+              ) : (
+                (notesData?.items || []).map(n => (
+                  <div key={n.id} className="flex items-start justify-between p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-750 transition-colors duration-200">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300">
+                          {n.locale.toUpperCase()}
+                        </span>
+                        <span className={`text-xs ${n.isPublished ? 'text-success-600' : 'text-warning-600'}`}>{n.isPublished ? 'Publié' : 'Brouillon'}</span>
+                        {n.publishedAt && (
+                          <span className="text-xs text-gray-500">• {new Date(n.publishedAt).toLocaleString()}</span>
+                        )}
+                      </div>
+                      <div className="font-medium text-gray-900 dark:text-white truncate mt-1">{n.title}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button className="text-sm text-brand-600 dark:text-brand-400 hover:underline" onClick={() => navigate(`/content/notes/${n.id}`)}>Ouvrir</button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+          <div className="mt-6 flex items-center justify-end gap-3">
+            <button 
+              onClick={() => navigate('/content/notes')}
+              className="text-sm text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+            >
+              Voir toutes les notes →
+            </button>
+            <button 
+              onClick={() => navigate('/content/notes/new')}
+              className="inline-flex items-center gap-2 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-lg transition-colors duration-200"
+            >
+              <FileText className="h-4 w-4" />
+              Nouvelle note
+            </button>
           </div>
         </div>
       </div>

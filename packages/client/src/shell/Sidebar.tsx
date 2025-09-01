@@ -13,7 +13,8 @@ import {
   HistoryIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  MenuIcon
+  MenuIcon,
+  FileTextIcon
 } from '@/icons';
 
 type NavItem = {
@@ -91,6 +92,14 @@ export function Sidebar() {
       ]
     },
     {
+      icon: <FileTextIcon />,
+      name: t('menu.content'),
+      labelKey: 'menu.content',
+      subItems: [
+        { name: t('menu.notes'), path: '/content/notes', labelKey: 'menu.notes' }
+      ]
+    },
+    {
       icon: <HistoryIcon />,
       name: t('menu.audit'),
       labelKey: 'menu.audit',
@@ -127,6 +136,14 @@ export function Sidebar() {
       subItems: [
         { name: t('menu.attendance'), path: '/attendance/sessions', labelKey: 'menu.attendance' },
         { name: t('menu.takeAttendance'), path: '/attendance/take', labelKey: 'menu.takeAttendance' }
+      ]
+    },
+    {
+      icon: <FileTextIcon />,
+      name: t('menu.content'),
+      labelKey: 'menu.content',
+      subItems: [
+        { name: t('menu.notes'), path: '/content/notes', labelKey: 'menu.notes' }
       ]
     }
   ];

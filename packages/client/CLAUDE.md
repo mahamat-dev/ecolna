@@ -1,656 +1,649 @@
-# CLAUDE.module-6-admin-utils.client.md
-**Module 6 (Client) — Audit Log & Global Search**
-_Client: Vite + React (TS), Tailwind, shadcn/ui, TanStack Query/Table, i18n (fr/ar/en)_
+# Module 7 — Client (Content & File Sharing)
 
-This module adds two admin utilities to the dashboard UI:
+**Frontend: React + TypeScript + Vite + Tailwind + shadcn/ui + TanStack Query**
+*Targets server Module 7 (local-disk storage only). Supports fr (default), ar, en.*
 
-1) **Audit Log Timeline** — browse/filter/paginate events recorded by the server.  
-2) **Global Search** — search across users, students, teachers, and sections (guardians optional).
+Publish **notes** (multilingual) with **file attachments**, target specific **audiences** (roles, grade levels, class sections, subjects, individual students/guardians), track **reads**, list/search with **pagination**, and **download** files via private URLs from the backend.
 
-> **Auth & RBAC**
-> - **Audit** screens are **ADMIN-only**.
-> - **Global Search** may be **ADMIN** or **STAFF** (follow your server policy).
-> - All requests use `credentials: "include"` session cookies.
+> This file gives complete client-side scaffolding: env, API contracts, hooks, components, pages, i18n strings, routing, role-guards, and test steps. It assumes your app already has Tailwind + shadcn and a global **QueryClientProvider** & **I18nextProvider**.
 
 ---
 
-## 0) File Map (client-only)
+## 0) Prerequisites
 
-src/
-features/
-admin-utils/
-api.ts # HTTP calls for audit/search
-schemas.ts # zod types
-pages/
-AuditTimeline.tsx # infinite timeline with filters
-SearchPage.tsx # global search page with tabs/grid
-components/
-AuditFilters.tsx
-AuditEventCard.tsx
-SearchDialog.tsx # ⌘K command palette (uses search API)
-
-yaml
-Copier le code
-
-> Assumes you already have:
-> - `src/lib/api.ts` (ky wrapper), `src/lib/ui.ts` (downloadCSV), `src/app/router.tsx`, `src/app/guards.tsx`, `src/app/shell/Header.tsx`
-> - shadcn/ui components and TanStack Query setup from the dashboard module
+* Existing React + TS app (Vite), Tailwind, shadcn/ui installed.
+* TanStack Query (React Query) configured with a `QueryClientProvider` at root.
+* i18n provider (i18next) already wired (see Module i18n). Default locale **fr**.
+* Auth/session already handled (cookies) per previously built modules.
 
 ---
 
-## 1) Data Contracts (aligns with server Module 6)
+## 1) Environment
 
-### 1.1 Zod Schemas
-`src/features/admin-utils/schemas.ts`
+Create/confirm `client/.env` (or `.env.local`):
+
+```env
+VITE_API_URL=http://localhost:4000/api
+VITE_MAX_FILE_MB=50
+```
+
+Small helper:
+
 ```ts
-import { z } from "zod";
+// src/lib/env.ts
+export const API_URL = import.meta.env.VITE_API_URL as string;
+export const MAX_FILE_MB = Number(import.meta.env.VITE_MAX_FILE_MB ?? 50);
+```
 
-export const AuditItem = z.object({
-  id: z.string().uuid(),
-  at: z.string(), // ISO
-  actorUserId: z.string().uuid().nullable(),
-  actorRoles: z.array(z.string()).nullable().optional(),
-  ip: z.string().nullable().optional(),
-  action: z.string(),
-  entityType: z.string(),
-  entityId: z.string().uuid().nullable(),
-  summary: z.string(),
-  meta: z.any().nullable(),
-});
-export type AuditItem = z.infer<typeof AuditItem>;
+---
 
-export const AuditListResponse = z.object({
-  items: z.array(AuditItem),
-  nextCursor: z
-    .object({ cursorAt: z.string(), cursorId: z.string().uuid() })
-    .nullable(),
-});
-export type AuditListResponse = z.infer<typeof AuditListResponse>;
+## 2) Types (mirror server DTOs)
 
-export const SearchBuckets = z.object({
-  users: z.array(z.object({ id: z.string().uuid(), email: z.string().nullable(), loginId: z.string().nullable(), isActive: z.boolean().nullable().optional() })).optional(),
-  students: z.array(z.object({ profileId: z.string().uuid(), firstName: z.string(), lastName: z.string(), userId: z.string().uuid() })).optional(),
-  teachers: z.array(z.object({ profileId: z.string().uuid(), firstName: z.string(), lastName: z.string(), userId: z.string().uuid() })).optional(),
-  sections: z.array(z.object({ id: z.string().uuid(), name: z.string(), gradeLevelId: z.string().uuid(), academicYearId: z.string().uuid() })).optional(),
-  guardians: z.array(z.object({ profileId: z.string().uuid(), firstName: z.string(), lastName: z.string(), userId: z.string().uuid() })).optional(),
-});
-export type SearchBuckets = z.infer<typeof SearchBuckets>;
-2) API Client
-src/features/admin-utils/api.ts
+```ts
+// src/modules/content/types.ts
+export type Locale = 'fr' | 'en' | 'ar';
 
-ts
-Copier le code
-import { get } from "@/lib/api";
-import { AuditListResponse, SearchBuckets } from "./schemas";
+export interface PresignResponse {
+  fileId: string;
+  storageKey: string;
+  presigned: { url: string; method: 'POST'; headers: Record<string,string> };
+}
 
-export type AuditQuery = {
-  entityType?: string;
-  entityId?: string;
-  action?: string;
-  actorUserId?: string;
-  from?: string; // ISO date
-  to?: string;   // ISO date
-  q?: string;    // text search
-  limit?: number;
-  cursorAt?: string;
-  cursorId?: string;
-};
+export interface FileObject {
+  id: string; filename: string; mime: string; sizeBytes: number; status: 'PENDING'|'READY'|'DELETED';
+}
 
-function qs(obj: Record<string, any>) {
-  const p = new URLSearchParams();
-  Object.entries(obj).forEach(([k,v]) => {
-    if (v === undefined || v === null || v === "") return;
-    p.set(k, String(v));
+export interface NoteTranslation { locale: Locale; title: string; bodyMd?: string | null; }
+
+export type AudienceScope = 'ALL'|'ROLE'|'STAGE'|'GRADE_LEVEL'|'CLASS_SECTION'|'SUBJECT'|'STUDENT'|'GUARDIAN';
+export type Role = 'ADMIN'|'STAFF'|'TEACHER'|'STUDENT'|'GUARDIAN';
+
+export interface AudienceInput {
+  scope: AudienceScope;
+  role?: Role;
+  stageId?: string;
+  gradeLevelId?: string;
+  classSectionId?: string;
+  subjectId?: string;
+  studentProfileId?: string;
+  guardianProfileId?: string;
+}
+
+export interface CreateNoteInput {
+  academicYearId?: string | null;
+  termId?: string | null;
+  translations: NoteTranslation[];
+  attachments: string[]; // fileIds
+  audiences: AudienceInput[];
+  pinUntil?: string | Date | null;
+}
+
+export interface NoteListItem {
+  id: string;
+  isPublished: boolean;
+  publishedAt?: string;
+  pinUntil?: string;
+  title: string;
+  locale: Locale;
+}
+
+export interface NoteDetail {
+  id: string;
+  isPublished: boolean;
+  publishedAt?: string;
+  pinUntil?: string;
+  translation: { locale: Locale; title: string; bodyMd?: string | null } | null;
+  attachments: { fileId: string; filename: string; mime: string; sizeBytes: number; url: string }[];
+}
+```
+
+---
+
+## 3) API Client
+
+```ts
+// src/modules/content/api.ts
+import { API_URL } from '@/lib/env';
+import type { CreateNoteInput, NoteDetail, NoteListItem, PresignResponse } from './types';
+
+async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    ...init,
   });
-  return p.toString();
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: { message: res.statusText }}));
+    throw new Error(err?.error?.message || res.statusText);
+  }
+  return res.json();
 }
 
-export async function fetchAudit(q: AuditQuery) {
-  const res = await get<unknown>(`admin/audit?${qs({ limit: 50, ...q })}`);
-  return AuditListResponse.parse(res);
-}
-
-export async function searchGlobal(q: { q: string; types?: string; limit?: number }) {
-  const res = await get<unknown>(`admin/search?${qs({ limit: 20, ...q })}`);
-  return SearchBuckets.parse(res);
-}
-3) Components
-3.1 Audit Filters
-src/features/admin-utils/components/AuditFilters.tsx
-
-tsx
-Copier le code
-import { useState } from "react";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { DatePicker } from "@/components/ui/date-picker"; // if you have; else use <Input type="date" />
-import { cn } from "@/lib/ui";
-
-type Props = {
-  initial?: {
-    action?: string;
-    entityType?: string;
-    actorUserId?: string;
-    from?: string;
-    to?: string;
-    q?: string;
-  };
-  onApply: (q: Props["initial"]) => void;
-  className?: string;
+export const ContentAPI = {
+  // Files
+  presign: (body: { filename: string; mime: string; sizeBytes: number; sha256?: string }): Promise<PresignResponse> =>
+    http('/content/files/presign', { method: 'POST', body: JSON.stringify(body) }),
+  commit: (body: { fileId: string; sizeBytes: number; sha256?: string }) =>
+    http('/content/files/commit', { method: 'POST', body: JSON.stringify(body) }),
+  // Notes
+  createNote: (body: CreateNoteInput) => http('/content/notes', { method: 'POST', body: JSON.stringify(body) }),
+  updateNote: (id: string, body: Partial<CreateNoteInput>) => http(`/content/notes/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  publish: (id: string, publish: boolean) => http(`/content/notes/${id}/publish`, { method: 'POST', body: JSON.stringify({ publish }) }),
+  listNotes: (params: URLSearchParams) => http<{ items: NoteListItem[]; nextCursor?: string | null }>(`/content/notes?${params.toString()}`),
+  getNote: (id: string, locale?: string) => http<NoteDetail>(`/content/notes/${id}${locale ? `?locale=${locale}`: ''}`),
+  markRead: (id: string) => http(`/content/notes/${id}/read`, { method: 'POST' }),
 };
+```
 
-export default function AuditFilters({ initial, onApply, className }: Props) {
-  const [action, setAction] = useState(initial?.action ?? "");
-  const [entityType, setEntityType] = useState(initial?.entityType ?? "");
-  const [actorUserId, setActorUserId] = useState(initial?.actorUserId ?? "");
-  const [from, setFrom] = useState(initial?.from ?? "");
-  const [to, setTo] = useState(initial?.to ?? "");
-  const [q, setQ] = useState(initial?.q ?? "");
+---
+
+## 4) Hooks (TanStack Query)
+
+```ts
+// src/modules/content/hooks.ts
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ContentAPI } from './api';
+import type { CreateNoteInput, NoteDetail, NoteListItem } from './types';
+
+export function useNotesList(q: { q?: string; limit?: number; cursor?: string | null; locale?: string; mine?: boolean }) {
+  const params = new URLSearchParams();
+  params.set('limit', String(q.limit ?? 20));
+  params.set('audience', 'any');
+  if (q.q) params.set('q', q.q);
+  if (q.cursor) params.set('cursor', q.cursor);
+  if (q.locale) params.set('locale', q.locale);
+  if (q.mine) params.set('mine', 'true');
+  return useQuery({
+    queryKey: ['notes', params.toString()],
+    queryFn: () => ContentAPI.listNotes(params),
+    staleTime: 30_000,
+  });
+}
+
+export function useNoteDetail(id: string, locale?: string) {
+  return useQuery<NoteDetail>({
+    queryKey: ['note', id, locale],
+    queryFn: () => ContentAPI.getNote(id, locale),
+    enabled: Boolean(id),
+  });
+}
+
+export function useCreateNote() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateNoteInput) => ContentAPI.createNote(body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['notes'] }); },
+  });
+}
+
+export function useUpdateNote(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Partial<CreateNoteInput>) => ContentAPI.updateNote(id, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['note', id] }); qc.invalidateQueries({ queryKey: ['notes'] }); },
+  });
+}
+
+export function usePublishNote(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (publish: boolean) => ContentAPI.publish(id, publish),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['note', id] }); qc.invalidateQueries({ queryKey: ['notes'] }); },
+  });
+}
+
+export function useMarkRead(id: string) {
+  return useMutation({ mutationFn: () => ContentAPI.markRead(id) });
+}
+```
+
+---
+
+## 5) File Upload (Local presign + POST + commit)
+
+### 5.1 WebCrypto (optional) — sha256
+
+```ts
+// src/lib/hash.ts
+export async function sha256Hex(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const hash = await crypto.subtle.digest('SHA-256', buffer);
+  const bytes = new Uint8Array(hash);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+```
+
+### 5.2 Component: `FileUploader`
+
+* Calls `/content/files/presign` with filename/mime/size (+hash if computed)
+* Uploads with **`XMLHttpRequest`** to support progress events
+* Commits `/content/files/commit`
+* Emits created `fileId`
+
+```tsx
+// src/modules/content/components/FileUploader.tsx
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
+import { ContentAPI } from '../api';
+import { MAX_FILE_MB } from '@/lib/env';
+import { sha256Hex } from '@/lib/hash';
+
+export function FileUploader({ onUploaded }: { onUploaded: (fileId: string) => void }) {
+  const [progress, setProgress] = useState<number>(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setError(null);
+    if (f.size > MAX_FILE_MB * 1024 * 1024) {
+      setError(`Max ${MAX_FILE_MB}MB`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const sha = await sha256Hex(f).catch(() => undefined);
+      const presign = await ContentAPI.presign({ filename: f.name, mime: f.type || 'application/octet-stream', sizeBytes: f.size, sha256: sha });
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', presign.presigned.url, true);
+        xhr.upload.onprogress = (evt) => { if (evt.lengthComputable) setProgress(Math.round((evt.loaded/evt.total)*100)); };
+        xhr.onload = () => (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(`Upload failed ${xhr.status}`));
+        xhr.onerror = () => reject(new Error('Network error during upload'));
+        xhr.send(f);
+      });
+
+      await ContentAPI.commit({ fileId: presign.fileId, sizeBytes: f.size, sha256: sha });
+      onUploaded(presign.fileId);
+      setProgress(100);
+    } catch (e: any) {
+      setError(e.message || 'Upload failed');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
-    <div className={cn("grid gap-2 md:grid-cols-6", className)}>
-      <div className="col-span-2">
-        <Label>Action</Label>
-        <Input value={action} onChange={e=>setAction(e.target.value)} placeholder="e.g., ENROLL_CREATE" />
-      </div>
-      <div className="col-span-2">
-        <Label>Entity</Label>
-        <Input value={entityType} onChange={e=>setEntityType(e.target.value)} placeholder="e.g., ENROLLMENT" />
-      </div>
-      <div className="col-span-2">
-        <Label>Actor (userId)</Label>
-        <Input value={actorUserId} onChange={e=>setActorUserId(e.target.value)} placeholder="uuid…" />
-      </div>
-
-      <div>
-        <Label>From</Label>
-        <Input type="date" value={from} onChange={e=>setFrom(e.target.value)} />
-      </div>
-      <div>
-        <Label>To</Label>
-        <Input type="date" value={to} onChange={e=>setTo(e.target.value)} />
-      </div>
-      <div className="md:col-span-2">
-        <Label>Search</Label>
-        <Input value={q} onChange={e=>setQ(e.target.value)} placeholder="text…" />
-      </div>
-      <div className="flex items-end">
-        <Button className="w-full" onClick={() => onApply({ action, entityType, actorUserId, from, to, q })}>
-          Apply
-        </Button>
-      </div>
+    <div className="space-y-2">
+      <input type="file" onChange={handleSelect} disabled={busy} />
+      {busy && <Progress value={progress} />}
+      {error && <p className="text-sm text-red-600">{error}</p>}
     </div>
   );
 }
-3.2 Audit Event Card (grouped timeline)
-src/features/admin-utils/components/AuditEventCard.tsx
+```
 
-tsx
-Copier le code
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { AuditItem } from "../schemas";
+For **multiple** files, wrap multiple `FileUploader` or adapt to accept multiple and collect IDs.
 
-export default function AuditEventCard({ item }: { item: AuditItem }) {
+---
+
+## 6) Form Pieces
+
+### 6.1 Translations editor
+
+```tsx
+// src/modules/content/components/TranslationFields.tsx
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import type { Locale, NoteTranslation } from '../types';
+
+const LOCALES: Locale[] = ['fr','en','ar'];
+
+export function TranslationFields({ value, onChange }: { value: NoteTranslation[]; onChange: (v: NoteTranslation[]) => void }) {
+  function setItem(loc: Locale, patch: Partial<NoteTranslation>) {
+    const next = [...value];
+    const idx = next.findIndex(t => t.locale === loc);
+    if (idx >= 0) next[idx] = { ...next[idx], ...patch } as NoteTranslation; else next.push({ locale: loc, title: '', bodyMd: '', ...patch } as NoteTranslation);
+    onChange(next);
+  }
   return (
-    <Card className="shadow-sm">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <span className="px-2 py-0.5 text-[10px] rounded bg-muted">{item.action}</span>
-          <span className="text-muted-foreground">·</span>
-          <span className="text-xs">{new Date(item.at).toLocaleString()}</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-1 text-sm">
-        <div className="font-medium">{item.summary}</div>
-        <div className="text-xs text-muted-foreground">
-          {item.entityType}{item.entityId ? ` • ${item.entityId}` : ""} {item.actorUserId ? `• actor ${item.actorUserId}` : ""}
-          {item.ip ? ` • ip ${item.ip}` : ""}
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {LOCALES.map(loc => (
+        <div key={loc} className="space-y-2 border p-3 rounded-xl">
+          <div className="text-xs uppercase opacity-70">{loc}</div>
+          <Input placeholder="Titre" value={value.find(v=>v.locale===loc)?.title || ''} onChange={e=>setItem(loc,{ title: e.target.value })} />
+          <Textarea placeholder="Corps (Markdown)" rows={8} value={value.find(v=>v.locale===loc)?.bodyMd || ''} onChange={e=>setItem(loc,{ bodyMd: e.target.value })} />
         </div>
-        {item.meta ? (
-          <pre className="text-xs bg-muted rounded p-2 overflow-x-auto">{JSON.stringify(item.meta, null, 2)}</pre>
-        ) : null}
-      </CardContent>
-    </Card>
+      ))}
+    </div>
   );
 }
-3.3 Command Palette (⌘K) — Global Search
-src/features/admin-utils/components/SearchDialog.tsx
+```
 
-tsx
-Copier le code
-import * as React from "react";
-import { searchGlobal } from "../api";
-import { useNavigate } from "react-router-dom";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2 } from "lucide-react";
+### 6.2 Audience selector (MVP)
 
-type Props = { open: boolean; onOpenChange: (v:boolean)=>void };
+> Uses IDs. You can enhance by autocompletes calling your academics/enrollment endpoints.
 
-export default function SearchDialog({ open, onOpenChange }: Props){
-  const [q, setQ] = React.useState("");
-  const [loading, setLoading] = React.useState(false);
-  const [data, setData] = React.useState<any>({});
-  const nav = useNavigate();
+```tsx
+// src/modules/content/components/AudienceSelector.tsx
+import { useState } from 'react';
+import type { AudienceInput, Role } from '../types';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
-  React.useEffect(() => {
-    function onKey(e: KeyboardEvent){
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k"){
-        e.preventDefault(); onOpenChange(true);
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onOpenChange]);
+const ROLES: Role[] = ['ADMIN','STAFF','TEACHER','STUDENT','GUARDIAN'];
 
-  async function run(){
-    if (q.trim().length < 2) return;
-    setLoading(true);
-    try {
-      const res = await searchGlobal({ q, types: "users,students,teachers,sections", limit: 8 });
-      setData(res);
-    } finally { setLoading(false); }
+export function AudienceSelector({ value, onChange }: { value: AudienceInput[]; onChange: (v: AudienceInput[]) => void }) {
+  const [scope, setScope] = useState<AudienceInput['scope']>('ALL');
+  const [payload, setPayload] = useState<Partial<AudienceInput>>({});
+
+  function add() {
+    const item: AudienceInput = { scope, ...payload } as AudienceInput;
+    onChange([...(value||[]), item]);
+    setPayload({});
   }
 
-  function go(path: string){
-    onOpenChange(false);
-    nav(path);
+  function remove(i: number) {
+    const next = [...value];
+    next.splice(i,1); onChange(next);
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl p-0">
-        <div className="p-3 border-b">
-          <Input autoFocus value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter" && run()} placeholder="Search users, students, sections…" />
-        </div>
-        <ScrollArea className="max-h-[60vh] p-3">
-          {loading ? <div className="p-4 flex items-center gap-2 text-sm"><Loader2 className="h-4 w-4 animate-spin" /> Searching…</div> : (
-            <div className="grid md:grid-cols-2 gap-3">
-              {data.users?.length ? (
-                <div>
-                  <div className="text-xs uppercase text-muted-foreground mb-1">Users</div>
-                  <ul className="space-y-1">
-                    {data.users.map((u:any)=>(
-                      <li key={u.id} className="p-2 rounded hover:bg-muted cursor-pointer"
-                          onClick={()=>go(`/users/${u.id}`)}>
-                        {u.email ?? u.loginId ?? u.id}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {data.students?.length ? (
-                <div>
-                  <div className="text-xs uppercase text-muted-foreground mb-1">Students</div>
-                  <ul className="space-y-1">
-                    {data.students.map((s:any)=>(
-                      <li key={s.profileId} className="p-2 rounded hover:bg-muted cursor-pointer"
-                          onClick={()=>go(`/students/${s.profileId}`)}>
-                        {s.firstName} {s.lastName}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {data.teachers?.length ? (
-                <div>
-                  <div className="text-xs uppercase text-muted-foreground mb-1">Teachers</div>
-                  <ul className="space-y-1">
-                    {data.teachers.map((t:any)=>(
-                      <li key={t.profileId} className="p-2 rounded hover:bg-muted cursor-pointer"
-                          onClick={()=>go(`/teachers/${t.profileId}`)}>
-                        {t.firstName} {t.lastName}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {data.sections?.length ? (
-                <div>
-                  <div className="text-xs uppercase text-muted-foreground mb-1">Sections</div>
-                  <ul className="space-y-1">
-                    {data.sections.map((c:any)=>(
-                      <li key={c.id} className="p-2 rounded hover:bg-muted cursor-pointer"
-                          onClick={()=>go(`/academics/sections?focus=${c.id}`)}>
-                        {c.name}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {!loading && !data.users?.length && !data.students?.length && !data.teachers?.length && !data.sections?.length && q &&
-                <div className="text-sm text-muted-foreground px-2">No matches</div>}
-            </div>
-          )}
-        </ScrollArea>
-      </DialogContent>
-    </Dialog>
+    <div className="space-y-2">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <select className="border rounded px-2 py-2" value={scope} onChange={e=>setScope(e.target.value as any)}>
+          {['ALL','ROLE','STAGE','GRADE_LEVEL','CLASS_SECTION','SUBJECT','STUDENT','GUARDIAN'].map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        {scope==='ROLE' && (
+          <select className="border rounded px-2 py-2" value={payload.role as any || ''} onChange={e=>setPayload(p=>({ ...p, role: e.target.value as Role }))}>
+            <option value="">role…</option>
+            {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        )}
+        {scope==='GRADE_LEVEL' && <Input placeholder="gradeLevelId" value={payload.gradeLevelId||''} onChange={e=>setPayload(p=>({ ...p, gradeLevelId: e.target.value }))} />}
+        {scope==='CLASS_SECTION' && <Input placeholder="classSectionId" value={payload.classSectionId||''} onChange={e=>setPayload(p=>({ ...p, classSectionId: e.target.value }))} />}
+        {scope==='SUBJECT' && <Input placeholder="subjectId" value={payload.subjectId||''} onChange={e=>setPayload(p=>({ ...p, subjectId: e.target.value }))} />}
+        {scope==='STUDENT' && <Input placeholder="studentProfileId" value={payload.studentProfileId||''} onChange={e=>setPayload(p=>({ ...p, studentProfileId: e.target.value }))} />}
+        {scope==='GUARDIAN' && <Input placeholder="guardianProfileId" value={payload.guardianProfileId||''} onChange={e=>setPayload(p=>({ ...p, guardianProfileId: e.target.value }))} />}
+      </div>
+      <Button type="button" onClick={add} className="mt-1">Ajouter</Button>
+      <ul className="text-sm space-y-1">
+        {value.map((a,i)=>(
+          <li key={i} className="flex items-center justify-between border rounded p-2">
+            <span>{a.scope}{a.role?`:${a.role}`:''}{a.gradeLevelId?`#${a.gradeLevelId}`:''}{a.classSectionId?`#${a.classSectionId}`:''}{a.subjectId?`#${a.subjectId}`:''}{a.studentProfileId?`#${a.studentProfileId}`:''}{a.guardianProfileId?`#${a.guardianProfileId}`:''}</span>
+            <Button type="button" variant="ghost" size="sm" onClick={()=>remove(i)}>✕</Button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
-4) Pages
-4.1 Audit Timeline (infinite scroll + filters + CSV)
-src/features/admin-utils/pages/AuditTimeline.tsx
+```
 
-tsx
-Copier le code
-import * as React from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
-import { fetchAudit } from "../api";
-import AuditFilters from "../components/AuditFilters";
-import AuditEventCard from "../components/AuditEventCard";
-import { Button } from "@/components/ui/button";
-import { downloadCSV } from "@/lib/ui";
-import { Loader2 } from "lucide-react";
+---
 
-function groupByDate(items: any[]) {
-  const map = new Map<string, any[]>();
-  for (const it of items) {
-    const d = new Date(it.at);
-    const key = d.toISOString().slice(0,10); // YYYY-MM-DD
-    if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(it);
+## 7) Note Form (Create/Edit)
+
+```tsx
+// src/modules/content/components/NoteForm.tsx
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { TranslationFields } from './TranslationFields';
+import { AudienceSelector } from './AudienceSelector';
+import { FileUploader } from './FileUploader';
+import type { AudienceInput, CreateNoteInput, NoteTranslation } from '../types';
+
+export function NoteForm({ initial, onSubmit, submitting }:{ initial?: Partial<CreateNoteInput>; submitting?: boolean; onSubmit: (val: CreateNoteInput) => void }) {
+  const [translations, setTranslations] = useState<NoteTranslation[]>(initial?.translations || [{ locale:'fr', title:'', bodyMd:'' }]);
+  const [audiences, setAudiences] = useState<AudienceInput[]>(initial?.audiences || [{ scope:'ALL' } as AudienceInput]);
+  const [attachments, setAttachments] = useState<string[]>(initial?.attachments || []);
+  const [pinUntil, setPinUntil] = useState<string>(initial?.pinUntil as any || '');
+
+  function addFile(fileId: string){ setAttachments(prev => [...prev, fileId]); }
+
+  function submit(){
+    onSubmit({ translations, audiences, attachments, pinUntil: pinUntil || null });
   }
-  return Array.from(map.entries()).sort((a,b)=> a[0] < b[0] ? 1 : -1);
+
+  return (
+    <div className="space-y-6">
+      <section className="space-y-2">
+        <h3 className="font-semibold">Traductions</h3>
+        <TranslationFields value={translations} onChange={setTranslations} />
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="font-semibold">Fichiers</h3>
+        <FileUploader onUploaded={addFile} />
+        <div className="text-sm opacity-70">Fichiers joints: {attachments.length}</div>
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="font-semibold">Audience</h3>
+        <AudienceSelector value={audiences} onChange={setAudiences} />
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="font-semibold">Épinglage</h3>
+        <Input type="datetime-local" value={pinUntil} onChange={e=>setPinUntil(e.target.value)} />
+      </section>
+
+      <Button onClick={submit} disabled={submitting}>Enregistrer</Button>
+    </div>
+  );
 }
+```
 
-export default function AuditTimeline(){
-  const [filters, setFilters] = React.useState<any>({});
-  const qKey = ["audit", filters];
+---
 
-  const query = useInfiniteQuery({
-    queryKey: qKey,
-    queryFn: ({ pageParam }) => fetchAudit({ ...filters, ...(pageParam ?? {}) }),
-    getNextPageParam: (last) => last.nextCursor ?? undefined,
-    initialPageParam: undefined as any,
-  });
+## 8) Pages & Routing
 
-  const pages = query.data?.pages ?? [];
-  const all = pages.flatMap(p => p.items);
-  const groups = groupByDate(all);
+### 8.1 List Page
 
-  function exportCsv(){
-    downloadCSV(all.map(i => ({
-      id: i.id, at: i.at, action: i.action, entityType: i.entityType, entityId: i.entityId,
-      actorUserId: i.actorUserId, ip: i.ip, summary: i.summary
-    })), "audit.csv");
-  }
+```tsx
+// src/modules/content/pages/NotesListPage.tsx
+import { useState } from 'react';
+import { useNotesList } from '../hooks';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Link } from 'react-router-dom';
+
+export default function NotesListPage(){
+  const [q,setQ] = useState('');
+  const [cursor,setCursor] = useState<string | null>(null);
+  const { data, isLoading, refetch } = useNotesList({ q, limit: 20, cursor });
+
+  const items = data?.items ?? [];
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Audit</h1>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={exportCsv}>Export CSV</Button>
-          <Button variant="outline" onClick={()=>query.refetch()}>Refresh</Button>
-        </div>
+      <div className="flex items-center gap-2">
+        <Input placeholder="Rechercher" value={q} onChange={e=>setQ(e.target.value)} />
+        <Button onClick={()=>{ setCursor(null); refetch(); }}>Rechercher</Button>
+        <Link to="/content/notes/new" className="ml-auto"><Button>Nouveau</Button></Link>
       </div>
 
-      <AuditFilters onApply={(f)=>{ setFilters(f); }} className="mb-2" />
-
-      {query.isLoading ? (
-        <div className="p-8 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
-      ) : (
-        <div className="space-y-6">
-          {groups.map(([day, items]) => (
-            <section key={day} className="space-y-2">
-              <div className="text-sm font-semibold">{new Date(day).toLocaleDateString()}</div>
-              <div className="grid gap-2">
-                {items.map((it:any)=> <AuditEventCard key={it.id} item={it} />)}
-              </div>
-            </section>
+      {isLoading ? <p>Chargement…</p> : (
+        <ul className="space-y-2">
+          {items.map(n => (
+            <li key={n.id} className="border rounded-xl p-3">
+              <Link to={`/content/notes/${n.id}`} className="font-medium hover:underline">{n.title}</Link>
+              <div className="text-xs opacity-70">{n.isPublished ? 'Publié' : 'Brouillon'} · {n.publishedAt ? new Date(n.publishedAt).toLocaleString() : ''}</div>
+            </li>
           ))}
-          {query.hasNextPage && (
-            <div className="flex justify-center pt-2">
-              <Button onClick={()=>query.fetchNextPage()} disabled={query.isFetchingNextPage}>
-                {query.isFetchingNextPage ? "Loading…" : "Load more"}
-              </Button>
-            </div>
-          )}
-          {!query.hasNextPage && all.length > 0 && (
-            <div className="text-center text-xs text-muted-foreground py-2">No more results</div>
-          )}
-        </div>
+        </ul>
+      )}
+
+      {data?.nextCursor && (
+        <Button variant="outline" onClick={()=>setCursor(data.nextCursor!)}>Plus</Button>
       )}
     </div>
   );
 }
-4.2 Global Search Page (tabs + grids + CSV)
-src/features/admin-utils/pages/SearchPage.tsx
+```
 
-tsx
-Copier le code
-import * as React from "react";
-import { searchGlobal } from "../api";
-import { useQuery } from "@tanstack/react-query";
-import { Input } from "@/components/ui/input";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Button } from "@/components/ui/button";
-import { downloadCSV } from "@/lib/ui";
-import { Link } from "react-router-dom";
+### 8.2 Create Page
 
-export default function SearchPage(){
-  const [q, setQ] = React.useState("");
-  const [types, setTypes] = React.useState("users,students,teachers,sections");
-  const query = useQuery({
-    queryKey: ["admin-search", q, types],
-    queryFn: () => searchGlobal({ q, types, limit: 50 }),
-    enabled: q.trim().length >= 2
-  });
+```tsx
+// src/modules/content/pages/NoteCreatePage.tsx
+import { useNavigate } from 'react-router-dom';
+import { useCreateNote } from '../hooks';
+import { NoteForm } from '../components/NoteForm';
 
-  const data = query.data ?? {};
-  const tabs = [
-    ["users", data.users ?? []],
-    ["students", data.students ?? []],
-    ["teachers", data.teachers ?? []],
-    ["sections", data.sections ?? []],
-  ] as const;
+export default function NoteCreatePage(){
+  const nav = useNavigate();
+  const create = useCreateNote();
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Global Search</h1>
-
-      <div className="flex gap-2 items-center">
-        <Input value={q} onChange={e=>setQ(e.target.value)} placeholder="Type at least 2 characters…" className="max-w-lg" />
-        <Button variant="outline" onClick={() => q && query.refetch()} disabled={q.trim().length < 2}>Search</Button>
-        <Button variant="outline" onClick={() => {
-          const flat = [
-            ...(data.users ?? []).map((x:any)=>({ bucket:"user", id:x.id, label:x.email ?? x.loginId ?? x.id })),
-            ...(data.students ?? []).map((x:any)=>({ bucket:"student", id:x.profileId, label:`${x.firstName} ${x.lastName}` })),
-            ...(data.teachers ?? []).map((x:any)=>({ bucket:"teacher", id:x.profileId, label:`${x.firstName} ${x.lastName}` })),
-            ...(data.sections ?? []).map((x:any)=>({ bucket:"section", id:x.id, label:x.name })),
-          ];
-          downloadCSV(flat, "search.csv");
-        }}>Export CSV</Button>
-      </div>
-
-      <Tabs defaultValue="users">
-        <TabsList>
-          {tabs.map(([k, arr])=>(
-            <TabsTrigger key={k} value={k}>{k} ({arr.length})</TabsTrigger>
-          ))}
-        </TabsList>
-
-        <TabsContent value="users">
-          <div className="rounded border overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-muted">
-                <tr><th className="px-3 py-2 text-start">ID</th><th className="px-3 py-2 text-start">Email</th><th className="px-3 py-2 text-start">Login ID</th></tr>
-              </thead>
-              <tbody>
-                {(data.users ?? []).map((u:any)=>(
-                  <tr key={u.id} className="border-t hover:bg-muted/40">
-                    <td className="px-3 py-2"><Link className="underline" to={`/users/${u.id}`}>{u.id}</Link></td>
-                    <td className="px-3 py-2">{u.email ?? "—"}</td>
-                    <td className="px-3 py-2">{u.loginId ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="students">
-          <div className="rounded border overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-muted">
-                <tr><th className="px-3 py-2 text-start">Profile</th><th className="px-3 py-2 text-start">Name</th></tr>
-              </thead>
-              <tbody>
-                {(data.students ?? []).map((s:any)=>(
-                  <tr key={s.profileId} className="border-t hover:bg-muted/40">
-                    <td className="px-3 py-2"><Link className="underline" to={`/students/${s.profileId}`}>{s.profileId}</Link></td>
-                    <td className="px-3 py-2">{s.firstName} {s.lastName}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="teachers">
-          <div className="rounded border overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-muted">
-                <tr><th className="px-3 py-2 text-start">Profile</th><th className="px-3 py-2 text-start">Name</th></tr>
-              </thead>
-              <tbody>
-                {(data.teachers ?? []).map((t:any)=>(
-                  <tr key={t.profileId} className="border-t hover:bg-muted/40">
-                    <td className="px-3 py-2"><Link className="underline" to={`/teachers/${t.profileId}`}>{t.profileId}</Link></td>
-                    <td className="px-3 py-2">{t.firstName} {t.lastName}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </TabsContent>
-
-        <TabsContent value="sections">
-          <div className="rounded border overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-muted">
-                <tr><th className="px-3 py-2 text-start">ID</th><th className="px-3 py-2 text-start">Name</th></tr>
-              </thead>
-              <tbody>
-                {(data.sections ?? []).map((c:any)=>(
-                  <tr key={c.id} className="border-t hover:bg-muted/40">
-                    <td className="px-3 py-2"><Link className="underline" to={`/academics/sections?focus=${c.id}`}>{c.id}</Link></td>
-                    <td className="px-3 py-2">{c.name}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </TabsContent>
-      </Tabs>
+      <h2 className="text-xl font-semibold">Nouvelle note</h2>
+      <NoteForm onSubmit={(val)=>create.mutate(val, { onSuccess: (n:any)=> nav(`/content/notes/${n.id}`) })} submitting={create.isPending} />
     </div>
   );
 }
-5) Router & Shell Integration
-5.1 Routes
-Add both pages to your router behind guards:
+```
 
-tsx
-Copier le code
-// src/app/router.tsx (excerpt)
-import AuditTimeline from "@/features/admin-utils/pages/AuditTimeline";
-import SearchPage from "@/features/admin-utils/pages/SearchPage";
-import { RequireAdmin, RequireStaffOrAdmin } from "./guards";
+### 8.3 Detail Page
 
-{
-  element: <RequireAdmin />, children: [
-    { path: "audit", element: <AuditTimeline /> },
-  ]
-},
-{
-  element: <RequireStaffOrAdmin />, children: [
-    { path: "search", element: <SearchPage /> },
-  ]
+```tsx
+// src/modules/content/pages/NoteDetailPage.tsx
+import { useParams } from 'react-router-dom';
+import { useNoteDetail, useMarkRead, usePublishNote } from '../hooks';
+import { Button } from '@/components/ui/button';
+
+export default function NoteDetailPage(){
+  const { id } = useParams();
+  const { data, isLoading } = useNoteDetail(id!);
+  const mark = useMarkRead(id!);
+  const pub = usePublishNote(id!);
+
+  if (isLoading) return <p>Chargement…</p>;
+  if (!data) return <p>Introuvable</p>;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <h2 className="text-xl font-semibold flex-1">{data.translation?.title || '(sans titre)'}</h2>
+        {data.isPublished
+          ? <Button variant="outline" onClick={()=>pub.mutate(false)}>Dépublier</Button>
+          : <Button onClick={()=>pub.mutate(true)}>Publier</Button>}
+        <Button variant="secondary" onClick={()=>mark.mutate()}>Marquer comme lu</Button>
+      </div>
+
+      {data.translation?.bodyMd && (
+        <article className="prose max-w-none" dangerouslySetInnerHTML={{ __html: sanitizeMarkdown(data.translation.bodyMd) }} />
+      )}
+
+      <section className="space-y-2">
+        <h3 className="font-semibold">Pièces jointes</h3>
+        <ul className="list-disc pl-5">
+          {data.attachments.map(att => (
+            <li key={att.fileId}><a className="text-blue-600 hover:underline" href={att.url}>{att.filename}</a></li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
 }
-5.2 Sidebar & Header
-Add “Audit” (ADMIN only) and “Search” (ADMIN/STAFF) entries in Sidebar.
 
-Mount SearchDialog in Header and wire ⌘K / Ctrl+K:
+// Minimal MD sanitizer placeholder — replace with a real sanitizer/renderer
+function sanitizeMarkdown(md?: string){
+  const esc = (s:string)=>s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]!));
+  return `<pre>${esc(md||'')}</pre>`;
+}
+```
 
-tsx
-Copier le code
-// src/app/shell/Header.tsx (excerpt)
-import SearchDialog from "@/features/admin-utils/components/SearchDialog";
-const [open, setOpen] = useState(false);
-<LanguageSwitcher />
-<Button variant="outline" onClick={()=>setOpen(true)}>⌘K</Button>
-<SearchDialog open={open} onOpenChange={setOpen} />
-6) i18n Keys (add to fr/en/ar)
-src/locales/fr.json
+### 8.4 Routing entries
 
-json
-Copier le code
-{
-  "audit": {
-    "title": "Historique",
-    "filters": { "action":"Action", "entity":"Entité", "actor":"Acteur", "from":"Du", "to":"Au", "search":"Recherche", "apply":"Appliquer" },
-    "exportCsv": "Exporter CSV",
-    "refresh": "Rafraîchir",
-    "loadMore": "Charger plus",
-    "noMore": "Plus de résultats"
+Integrate these into your router (example with `react-router-dom`):
+
+```tsx
+// src/app-routes.tsx (excerpt)
+import NotesListPage from '@/modules/content/pages/NotesListPage';
+import NoteCreatePage from '@/modules/content/pages/NoteCreatePage';
+import NoteDetailPage from '@/modules/content/pages/NoteDetailPage';
+import { RequireRoles } from '@/modules/content/role-guard';
+
+export const routes = [
+  { path: '/content/notes', element: <NotesListPage /> },
+  { path: '/content/notes/new', element: <RequireRoles roles={['ADMIN','STAFF','TEACHER']}><NoteCreatePage /></RequireRoles> },
+  { path: '/content/notes/:id', element: <NoteDetailPage /> },
+];
+```
+
+---
+
+## 9) Role guard
+
+```tsx
+// src/modules/content/role-guard.tsx
+import { Navigate } from 'react-router-dom';
+
+// Replace with your real auth state selector
+function useAuth(){
+  // example shape
+  return { roles: ['ADMIN'] as string[] | undefined, loading: false };
+}
+
+export function RequireRoles({ roles, children }:{ roles: string[]; children: React.ReactNode }){
+  const { roles: my, loading } = useAuth();
+  if (loading) return null;
+  if (!my || !roles.some(r => my.includes(r))) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+```
+
+---
+
+## 10) i18n strings (module-scoped)
+
+```ts
+// src/modules/content/i18n.ts
+export const contentI18n = {
+  fr: {
+    content: {
+      title: 'Contenus', search: 'Rechercher', new: 'Nouveau', attachments: 'Pièces jointes',
+      publish: 'Publier', unpublish: 'Dépublier', markRead: 'Marquer comme lu', loading: 'Chargement…',
+    }
   },
-  "search": {
-    "title": "Recherche globale",
-    "placeholder": "Saisir au moins 2 caractères…",
-    "exportCsv": "Exporter CSV",
-    "users":"Utilisateurs",
-    "students":"Élèves",
-    "teachers":"Enseignants",
-    "sections":"Classes",
-    "noMatches":"Aucun résultat"
-  }
-}
-Mirror the same keys in en.json and ar.json (RTL handled globally).
+  en: { content: { title: 'Contents', search: 'Search', new: 'New', attachments: 'Attachments', publish: 'Publish', unpublish:'Unpublish', markRead:'Mark as read', loading: 'Loading…' } },
+  ar: { content: { title: 'المحتوى', search: 'بحث', new: 'جديد', attachments: 'مرفقات', publish: 'نشر', unpublish:'إلغاء النشر', markRead:'وضع كمقروء', loading: 'جارٍ التحميل…' } },
+};
+```
 
-Replace hard-coded English strings in components with t("audit.*")/t("search.*") if you want full localization now.
+> Merge into your global i18n resources and ensure `dir="rtl"` is applied when locale is `ar`.
 
-7) UX Notes
-Audit: Keep meta collapsed if large; here we show it inline for simplicity.
+---
 
-Search: The page supports CSV export; the palette is for quick nav.
+## 11) UX notes
 
-For big datasets, switch to server-side paging (the APIs already support limits).
+* Show attachment count in list rows.
+* Show pin badge if `pinUntil` is in the future.
+* Respect locale for dates via `toLocaleString()` with user locale.
+* For large bodies, render Markdown with a proper renderer + sanitizer.
+* Disable create/publish buttons for non-authorized roles.
 
-8) Manual Tests
-Log in as ADMIN.
+---
 
-Go to /audit — you should see recent actions (create a user/enrollment to generate).
+## 12) Manual tests
 
-Filter by action=ENROLL_CREATE, set a date range, and Apply. Verify results tighten.
+1. Login as **ADMIN/STAFF/TEACHER**.
+2. Go to **/content/notes/new** → enter FR title & body, add audience `CLASS_SECTION#<id>`, upload a PDF → Save → Publish.
+3. As a **Student** in that section, visit **/content/notes** → item visible → open → download attachment → Mark as read.
+4. As **Admin**, list page search by keyword; click **Plus** to paginate.
 
-Click Load more until No more results.
+---
 
-Click Export CSV and open the file; columns should be populated.
+## 13) Definition of Done (Client)
 
-Open /search, type “am” (≥2 chars), verify results in each tab.
+* [ ] File upload works end-to-end (presign → POST → commit), progress displayed, errors surfaced.
+* [ ] Create/edit note with **translations (fr/en/ar)**, **audiences**, **attachments**, **pinUntil**.
+* [ ] List view with search & cursor pagination; shows only visible items (server enforces).
+* [ ] Detail view shows best-fit translation and attachment links; can publish/unpublish; can mark read.
+* [ ] Role-based guards enforced in routing/UI.
+* [ ] i18n strings loaded; RTL respected for ar.
+* [ ] No references to S3/minio; purely local upload URLs.
 
-Use ⌘K / Ctrl+K and search “sec” → select a section to navigate.
+---
 
-9) Definition of Done (Client Module 6)
- Route /audit (ADMIN) with filters, infinite pagination, CSV export.
+## 14) 
 
- Route /search (ADMIN/STAFF) with multi-bucket results and CSV export.
-
- Command palette bound to ⌘K/Ctrl+K using /admin/search.
-
- Error states handled (toasts/snackbars if you prefer).
-
- i18n keys added; RTL behaves under Arabic.
-
- Menu visibility respects RBAC.
-
-10) Future Enhancements
-Add column filters and sorting to the audit list with TanStack Table if you prefer a grid view.
-
-Add entity/action dropdowns fed by /admin/audit?distinct=entityType|action.
-
-Deep links from audit rows to the affected entity detail pages.
-
-Save/restore last-used filters in localStorage.
+* Rich Markdown editor (toolbar, preview, paste images → upload).
+* Audience autocomplete (fetch class sections, subjects, students) with async Combobox.
+* Infinite scroll via `useInfiniteQuery`.
+* Client-side caching of attachment metadata.
+* Toast notifications + optimistic updates for publish/unpublish.

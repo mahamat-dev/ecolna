@@ -16,6 +16,9 @@ import { Sessions } from '@/pages/attendance/Sessions';
 import { TakeAttendance } from '@/pages/attendance/TakeAttendance';
 import { AuditTimeline } from '@/pages/audit/AuditTimeline';
 import { Profile } from '@/pages/Profile';
+import NotesListPage from '@/modules/content/pages/NotesListPage';
+import NoteCreatePage from '@/modules/content/pages/NoteCreatePage';
+import NoteDetailPage from '@/modules/content/pages/NoteDetailPage';
 import { AuthGuard, RoleGuard } from '@/guards';
 import { AppShell } from '@/shell/AppShell';
 
@@ -130,6 +133,23 @@ const router = createBrowserRouter([
                <TakeAttendance />
              </RoleGuard>
            ),
+         },
+         // Content routes
+         {
+           path: 'content/notes',
+           element: <NotesListPage />,
+         },
+         {
+           path: 'content/notes/new',
+           element: (
+             <RoleGuard roles={["ADMIN", "STAFF", "TEACHER"]}>
+               <NoteCreatePage />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'content/notes/:id',
+           element: <NoteDetailPage />,
          },
          // Audit route
          {

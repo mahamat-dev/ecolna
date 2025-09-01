@@ -4,6 +4,7 @@ import { db } from "../../db/client";
 import {
   note, noteTranslation, noteAttachment, noteAudience, noteRead, fileObject
 } from "../../db/schema/content";
+import { profiles } from "../../db/schema/identity";
 import { CreateNoteDto, UpdateNoteDto, PublishDto, ListNotesQuery } from "./dto";
 import { requireAuth } from "../../middlewares/rbac";
 import { and, desc, eq, lt } from "drizzle-orm";
@@ -16,9 +17,14 @@ notesRouter.use(requireAuth);
 
 async function viewerFromReq(req: any) {
   const userId = req.session?.user?.id;
-  const profileId = req.session?.profileId;
+  if (!userId) throw new Error('Not authenticated');
+  
+  // Get profile from database using userId
+  const [profile] = await db.select().from(profiles).where(eq(profiles.userId, userId));
+  if (!profile) throw new Error('Profile not found');
+  
   const roles = await rolesOfUser(userId);
-  return { userId, profileId, roles };
+  return { userId, profileId: profile.id, roles };
 }
 
 notesRouter.post("/notes", async (req, res, next) => {
@@ -31,9 +37,9 @@ notesRouter.post("/notes", async (req, res, next) => {
 
     const noteRows = await db.insert(note).values({
       createdByProfileId: viewer.profileId,
-      academicYearId: dto.academicYearId ?? null,
-      termId: dto.termId ?? null,
-      pinUntil: dto.pinUntil ?? null,
+      academicYearId: dto.academicYearId || null,
+      termId: dto.termId || null,
+      pinUntil: dto.pinUntil || null,
     }).returning();
 
     const n = noteRows[0];
