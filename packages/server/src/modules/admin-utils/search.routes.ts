@@ -5,22 +5,22 @@ import { db } from '../../db/client';
 import { users, userRoles, profiles } from '../../db/schema/identity';
 import { classSection } from '../../db/schema/academics';
 import { and, eq, ilike, inArray, sql } from 'drizzle-orm';
+import { z } from 'zod';
 
 export const searchRouter = Router();
 // If you want STAFF too: replace requireAdmin with requireStaffOrAdmin
 searchRouter.use(requireAdmin);
 
 searchRouter.get('/', async (req, res) => {
-  const { q, types, limit } = SearchQuery.parse(req.query);
-  const like = `%${q}%`;
-  const buckets = new Set(
-    (types?.split(',').map(s=>s.trim().toLowerCase()) ?? ['users','students','teachers','sections'])
-      .filter(Boolean)
-  );
-
-  const out: Record<string, any[]> = {};
-
   try {
+    const { q, types, limit } = SearchQuery.parse(req.query);
+    const like = `%${q}%`;
+    const buckets = new Set(
+      (types?.split(',').map(s=>s.trim().toLowerCase()) ?? ['users','students','teachers','sections'])
+        .filter(Boolean)
+    );
+
+    const out: Record<string, any[]> = {};
     if (buckets.has('users')) {
       out.users = await db.select({
         id: users.id, 
@@ -96,6 +96,18 @@ searchRouter.get('/', async (req, res) => {
     res.json(out);
   } catch (err) {
     console.error('GET /admin/search failed', err);
+    
+    // Handle validation errors
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid search parameters',
+          details: err.errors
+        }
+      });
+    }
+    
     return res.status(500).json({ 
       error: { 
         code: 'INTERNAL_ERROR', 

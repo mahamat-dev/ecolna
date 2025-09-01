@@ -51,7 +51,7 @@ export function actorFromReq(req: Request): { userId?: string | null; roles?: st
   const userId: string | null = user?.id ?? null;
   const roles: string[] | null = Array.isArray(user?.roles) ? user.roles : null;
   const ip = (
-    (req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim()) ||
+    (req.headers?.['x-forwarded-for']?.toString().split(',')[0]?.trim()) ||
     req.socket?.remoteAddress ||
     (req as any).ip ||
     null
@@ -98,25 +98,20 @@ export async function listAudit(query: AuditListQuery) {
     }
   }
   
-  // Text search (FTS preferred, fallback to ILIKE)
+  // Text search (fallback to ILIKE for now)
   if (query.q) {
-    // Try FTS first if tsv column exists
-    try {
-      conds.push(sql`${auditLog}.tsv @@ websearch_to_tsquery(${query.q})`);
-    } catch {
-      // Fallback to ILIKE search
-      conds.push(or(
-        ilike(auditLog.summary, `%${query.q}%`) as any,
-        ilike(sql`${auditLog.meta}::text`, `%${query.q}%`) as any
-      ));
-    }
+    // Use ILIKE search for compatibility
+    conds.push(or(
+      ilike(auditLog.summary, `%${query.q}%`) as any,
+      ilike(sql`${auditLog.meta}::text`, `%${query.q}%`) as any
+    ));
   }
 
   const rows = await db
     .select({
       id: auditLog.id,
       at: auditLog.at,
-      who: auditLog.actorUserId,
+      actorUserId: auditLog.actorUserId,
       action: auditLog.action,
       summary: auditLog.summary,
       entityType: auditLog.entityType,
@@ -130,13 +125,27 @@ export async function listAudit(query: AuditListQuery) {
     .orderBy(desc(auditLog.at), desc(auditLog.id))
     .limit(query.limit);
 
+  // Format response to match client expectations
+  const items = rows.map(row => ({
+    id: row.id,
+    at: row.at?.toISOString() ?? new Date().toISOString(),
+    actorUserId: row.actorUserId,
+    actorRoles: row.actorRoles,
+    ip: row.ip,
+    action: row.action,
+    entityType: row.entityType,
+    entityId: row.entityId,
+    summary: row.summary ?? '',
+    meta: row.meta,
+  }));
+
   // Calculate next cursor
   const nextCursor = rows.length === query.limit && rows.length > 0
     ? { 
-        cursorAt: rows[rows.length - 1]?.at?.toISOString() ?? null, 
-        cursorId: rows[rows.length - 1]?.id ?? null 
+        cursorAt: rows[rows.length - 1]?.at?.toISOString() ?? new Date().toISOString(), 
+        cursorId: rows[rows.length - 1]?.id ?? '' 
       }
     : null;
 
-  return { items: rows, nextCursor };
+  return { items, nextCursor };
 }

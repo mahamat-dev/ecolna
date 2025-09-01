@@ -12,13 +12,24 @@ auditRouter.use(requireAdmin);
 
 // GET /api/admin/audit
 auditRouter.get('/', async (req, res) => {
-  const q = AuditListQuery.parse(req.query);
-  
   try {
+    const q = AuditListQuery.parse(req.query);
     const result = await listAudit(q);
     res.json(result);
   } catch (err) {
     console.error('GET /admin/audit failed', err);
+    
+    // Handle validation errors
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid query parameters',
+          details: err.errors
+        }
+      });
+    }
+    
     return res.status(500).json({ 
       error: { 
         code: 'INTERNAL_ERROR', 
@@ -30,9 +41,9 @@ auditRouter.get('/', async (req, res) => {
 
 // GET /api/admin/audit/:id (optional single audit log)
 auditRouter.get('/:id', async (req, res) => {
-  const id = z.string().uuid().parse(req.params.id);
-  
   try {
+    const id = z.string().uuid().parse(req.params.id);
+    
     const rows = await db.select().from(auditLog).where(eq(auditLog.id, id));
     if (!rows[0]) {
       return res.status(404).json({ 
@@ -45,6 +56,18 @@ auditRouter.get('/:id', async (req, res) => {
     res.json(rows[0]);
   } catch (err) {
     console.error('GET /admin/audit/:id failed', err);
+    
+    // Handle validation errors
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Invalid audit log ID',
+          details: err.errors
+        }
+      });
+    }
+    
     return res.status(500).json({ 
       error: { 
         code: 'INTERNAL_ERROR', 

@@ -1,577 +1,656 @@
-# CLAUDE.md — Admin Dashboard (Client)
-**Vite + React (TypeScript) + Tailwind + shadcn/ui • Connected to Modules 1–5 API**
+# CLAUDE.module-6-admin-utils.client.md
+**Module 6 (Client) — Audit Log & Global Search**
+_Client: Vite + React (TS), Tailwind, shadcn/ui, TanStack Query/Table, i18n (fr/ar/en)_
 
-Modern, fast admin UI to manage **Identity**, **Academics**, **Enrollment**, **Teaching Assignments**, and **Attendance**.
+This module adds two admin utilities to the dashboard UI:
 
-> **Auth model reminder**  
-> - Admins sign in with **email + password** (Module 1).  
-> - Dashboard supports **ADMIN** and **STAFF** (limited).  
-> - Backend uses **session cookies** → all fetch calls **must** use `credentials: 'include'`.
+1) **Audit Log Timeline** — browse/filter/paginate events recorded by the server.  
+2) **Global Search** — search across users, students, teachers, and sections (guardians optional).
 
----
-
-## 0) Deliverables
-
-- React app (Vite) styled with Tailwind + **shadcn/ui**
-- **DataGrid** (TanStack Table) with column filters & **CSV export**
-- **Role-based UI** (ADMIN vs STAFF) + route guards
-- Feature pages for **Modules 1–5** (API-connected)
-- **Global search** (users, students, sections)
-- **i18n** (default French labels; English fallback)
-- **PWA**: installable + offline cache for attendance (sessions/rosters) with a simple retry queue
-- Reusable **API client** (ky + zod) & global error handling
-- Clean **AppShell** (sidebar + header), dark mode, toasts, forms
+> **Auth & RBAC**
+> - **Audit** screens are **ADMIN-only**.
+> - **Global Search** may be **ADMIN** or **STAFF** (follow your server policy).
+> - All requests use `credentials: "include"` session cookies.
 
 ---
 
-## 1) Dependencies (conceptual)
-- UI: `react`, `react-router-dom`, `tailwindcss`, `shadcn/ui`, `lucide-react`, `sonner`
-- Forms/State: `react-hook-form`, `@hookform/resolvers`, `zod`, `@tanstack/react-query`
-- DataGrid: `@tanstack/react-table`
-- Networking: `ky`
-- i18n: `react-i18next`, `i18next`
-- PWA: `vite-plugin-pwa`
-- CSV: lightweight util (custom) or `papaparse` (optional)
-
----
-
-## 2) Project Structure (client)
+## 0) File Map (client-only)
 
 src/
-main.tsx
-app/
-App.tsx
-router.tsx
-providers.tsx # QueryClient, i18n, Theme, Toaster
-guards.tsx # RequireAuth / RequireAdmin / RequireStaffOrAdmin
-shell/
-AppShell.tsx
-Sidebar.tsx
-Header.tsx
-SearchDialog.tsx # Command-style global search
-lib/
-api.ts # ky client (credentials + baseURL)
-z.ts # zod helpers
-useMe.ts # /me query hook
-ui.ts # cn(), downloadCSV(), etc.
-i18n.ts # i18next config (fr + en)
-offlineQueue.ts # simple POST retry queue for attendance
-components/
-DataGrid.tsx # TanStack Table w/ filters + CSV
-ConfirmDialog.tsx
-CopyableSecret.tsx
-FormField.tsx
 features/
-auth/SignIn.tsx
+admin-utils/
+api.ts # HTTP calls for audit/search
+schemas.ts # zod types
+pages/
+AuditTimeline.tsx # infinite timeline with filters
+SearchPage.tsx # global search page with tabs/grid
+components/
+AuditFilters.tsx
+AuditEventCard.tsx
+SearchDialog.tsx # ⌘K command palette (uses search API)
 
-pgsql
-Copier le code
-identity/             # Module 1
-  pages/UsersList.tsx
-  pages/UserCreate.tsx
-  pages/UserDetail.tsx
-  api.ts
-  schemas.ts
-
-academics/            # Module 2
-  pages/Stages.tsx
-  pages/GradeLevels.tsx
-  pages/YearsTerms.tsx
-  pages/Subjects.tsx
-  pages/Sections.tsx
-  api.ts
-  schemas.ts
-
-enrollment/           # Module 3
-  pages/Enrollments.tsx
-  pages/GuardianLinks.tsx
-  api.ts
-  schemas.ts
-
-teaching/             # Module 4
-  pages/Assignments.tsx
-  api.ts
-  schemas.ts
-
-attendance/           # Module 5
-  pages/Sessions.tsx
-  pages/TakeAttendance.tsx
-  api.ts
-  schemas.ts
-
-audit/                # Timeline (optional)
-  pages/AuditTimeline.tsx
-  api.ts              # expects /api/admin/audit (read-only)
 yaml
 Copier le code
 
+> Assumes you already have:
+> - `src/lib/api.ts` (ky wrapper), `src/lib/ui.ts` (downloadCSV), `src/app/router.tsx`, `src/app/guards.tsx`, `src/app/shell/Header.tsx`
+> - shadcn/ui components and TanStack Query setup from the dashboard module
+
 ---
 
-## 3) Providers, Guards, and Role-Based Shell
+## 1) Data Contracts (aligns with server Module 6)
 
-### `src/app/providers.tsx`
-```tsx
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Toaster } from "sonner";
-import "./../lib/i18n"; // initialize i18next
-import { PropsWithChildren } from "react";
+### 1.1 Zod Schemas
+`src/features/admin-utils/schemas.ts`
+```ts
+import { z } from "zod";
 
-const client = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false } } });
+export const AuditItem = z.object({
+  id: z.string().uuid(),
+  at: z.string(), // ISO
+  actorUserId: z.string().uuid().nullable(),
+  actorRoles: z.array(z.string()).nullable().optional(),
+  ip: z.string().nullable().optional(),
+  action: z.string(),
+  entityType: z.string(),
+  entityId: z.string().uuid().nullable(),
+  summary: z.string(),
+  meta: z.any().nullable(),
+});
+export type AuditItem = z.infer<typeof AuditItem>;
 
-export function AppProviders({ children }: PropsWithChildren) {
+export const AuditListResponse = z.object({
+  items: z.array(AuditItem),
+  nextCursor: z
+    .object({ cursorAt: z.string(), cursorId: z.string().uuid() })
+    .nullable(),
+});
+export type AuditListResponse = z.infer<typeof AuditListResponse>;
+
+export const SearchBuckets = z.object({
+  users: z.array(z.object({ id: z.string().uuid(), email: z.string().nullable(), loginId: z.string().nullable(), isActive: z.boolean().nullable().optional() })).optional(),
+  students: z.array(z.object({ profileId: z.string().uuid(), firstName: z.string(), lastName: z.string(), userId: z.string().uuid() })).optional(),
+  teachers: z.array(z.object({ profileId: z.string().uuid(), firstName: z.string(), lastName: z.string(), userId: z.string().uuid() })).optional(),
+  sections: z.array(z.object({ id: z.string().uuid(), name: z.string(), gradeLevelId: z.string().uuid(), academicYearId: z.string().uuid() })).optional(),
+  guardians: z.array(z.object({ profileId: z.string().uuid(), firstName: z.string(), lastName: z.string(), userId: z.string().uuid() })).optional(),
+});
+export type SearchBuckets = z.infer<typeof SearchBuckets>;
+2) API Client
+src/features/admin-utils/api.ts
+
+ts
+Copier le code
+import { get } from "@/lib/api";
+import { AuditListResponse, SearchBuckets } from "./schemas";
+
+export type AuditQuery = {
+  entityType?: string;
+  entityId?: string;
+  action?: string;
+  actorUserId?: string;
+  from?: string; // ISO date
+  to?: string;   // ISO date
+  q?: string;    // text search
+  limit?: number;
+  cursorAt?: string;
+  cursorId?: string;
+};
+
+function qs(obj: Record<string, any>) {
+  const p = new URLSearchParams();
+  Object.entries(obj).forEach(([k,v]) => {
+    if (v === undefined || v === null || v === "") return;
+    p.set(k, String(v));
+  });
+  return p.toString();
+}
+
+export async function fetchAudit(q: AuditQuery) {
+  const res = await get<unknown>(`admin/audit?${qs({ limit: 50, ...q })}`);
+  return AuditListResponse.parse(res);
+}
+
+export async function searchGlobal(q: { q: string; types?: string; limit?: number }) {
+  const res = await get<unknown>(`admin/search?${qs({ limit: 20, ...q })}`);
+  return SearchBuckets.parse(res);
+}
+3) Components
+3.1 Audit Filters
+src/features/admin-utils/components/AuditFilters.tsx
+
+tsx
+Copier le code
+import { useState } from "react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { DatePicker } from "@/components/ui/date-picker"; // if you have; else use <Input type="date" />
+import { cn } from "@/lib/ui";
+
+type Props = {
+  initial?: {
+    action?: string;
+    entityType?: string;
+    actorUserId?: string;
+    from?: string;
+    to?: string;
+    q?: string;
+  };
+  onApply: (q: Props["initial"]) => void;
+  className?: string;
+};
+
+export default function AuditFilters({ initial, onApply, className }: Props) {
+  const [action, setAction] = useState(initial?.action ?? "");
+  const [entityType, setEntityType] = useState(initial?.entityType ?? "");
+  const [actorUserId, setActorUserId] = useState(initial?.actorUserId ?? "");
+  const [from, setFrom] = useState(initial?.from ?? "");
+  const [to, setTo] = useState(initial?.to ?? "");
+  const [q, setQ] = useState(initial?.q ?? "");
+
   return (
-    <QueryClientProvider client={client}>
-      {children}
-      <Toaster richColors />
-    </QueryClientProvider>
+    <div className={cn("grid gap-2 md:grid-cols-6", className)}>
+      <div className="col-span-2">
+        <Label>Action</Label>
+        <Input value={action} onChange={e=>setAction(e.target.value)} placeholder="e.g., ENROLL_CREATE" />
+      </div>
+      <div className="col-span-2">
+        <Label>Entity</Label>
+        <Input value={entityType} onChange={e=>setEntityType(e.target.value)} placeholder="e.g., ENROLLMENT" />
+      </div>
+      <div className="col-span-2">
+        <Label>Actor (userId)</Label>
+        <Input value={actorUserId} onChange={e=>setActorUserId(e.target.value)} placeholder="uuid…" />
+      </div>
+
+      <div>
+        <Label>From</Label>
+        <Input type="date" value={from} onChange={e=>setFrom(e.target.value)} />
+      </div>
+      <div>
+        <Label>To</Label>
+        <Input type="date" value={to} onChange={e=>setTo(e.target.value)} />
+      </div>
+      <div className="md:col-span-2">
+        <Label>Search</Label>
+        <Input value={q} onChange={e=>setQ(e.target.value)} placeholder="text…" />
+      </div>
+      <div className="flex items-end">
+        <Button className="w-full" onClick={() => onApply({ action, entityType, actorUserId, from, to, q })}>
+          Apply
+        </Button>
+      </div>
+    </div>
   );
 }
-src/app/guards.tsx
+3.2 Audit Event Card (grouped timeline)
+src/features/admin-utils/components/AuditEventCard.tsx
+
 tsx
 Copier le code
-import { Navigate, Outlet } from "react-router-dom";
-import { useMe } from "@/lib/useMe";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type { AuditItem } from "../schemas";
 
-export function RequireAuth(){
-  const { data, isLoading } = useMe();
-  if (isLoading) return null;
-  if (!data?.user) return <Navigate to="/sign-in" replace />;
-  return <Outlet />;
+export default function AuditEventCard({ item }: { item: AuditItem }) {
+  return (
+    <Card className="shadow-sm">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <span className="px-2 py-0.5 text-[10px] rounded bg-muted">{item.action}</span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-xs">{new Date(item.at).toLocaleString()}</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1 text-sm">
+        <div className="font-medium">{item.summary}</div>
+        <div className="text-xs text-muted-foreground">
+          {item.entityType}{item.entityId ? ` • ${item.entityId}` : ""} {item.actorUserId ? `• actor ${item.actorUserId}` : ""}
+          {item.ip ? ` • ip ${item.ip}` : ""}
+        </div>
+        {item.meta ? (
+          <pre className="text-xs bg-muted rounded p-2 overflow-x-auto">{JSON.stringify(item.meta, null, 2)}</pre>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
 }
+3.3 Command Palette (⌘K) — Global Search
+src/features/admin-utils/components/SearchDialog.tsx
 
-export function RequireAdmin(){
-  const { data, isLoading } = useMe();
-  if (isLoading) return null;
-  const roles = data?.user?.roles ?? [];
-  return roles.includes("ADMIN") ? <Outlet/> : <Navigate to="/" replace />;
-}
-
-export function RequireStaffOrAdmin(){
-  const { data, isLoading } = useMe();
-  if (isLoading) return null;
-  const roles = data?.user?.roles ?? [];
-  return (roles.includes("ADMIN") || roles.includes("STAFF")) ? <Outlet/> : <Navigate to="/" replace />;
-}
-Sidebar: role-aware menu (ADMIN gets all, STAFF limited)
-tsx
-Copier le code
-// src/app/shell/Sidebar.tsx (snippet)
-const adminItems = [
-  { to: "/users", labelKey: "menu.users", icon: UsersIcon },
-  { to: "/academics/stages", labelKey: "menu.stages", icon: LayersIcon },
-  { to: "/academics/grade-levels", labelKey: "menu.gradeLevels", icon: Layers3Icon },
-  { to: "/academics/years-terms", labelKey: "menu.yearsTerms", icon: CalendarRangeIcon },
-  { to: "/academics/subjects", labelKey: "menu.subjects", icon: BookIcon },
-  { to: "/academics/sections", labelKey: "menu.sections", icon: LayoutGridIcon },
-  { to: "/enrollment", labelKey: "menu.enrollment", icon: GraduationCapIcon },
-  { to: "/enrollment/guardians", labelKey: "menu.guardians", icon: UsersRoundIcon },
-  { to: "/teaching/assignments", labelKey: "menu.assignments", icon: ChalkboardIcon },
-  { to: "/attendance/sessions", labelKey: "menu.attendance", icon: ClipboardCheckIcon },
-  { to: "/attendance/take", labelKey: "menu.takeAttendance", icon: CheckSquareIcon },
-  { to: "/audit", labelKey: "menu.audit", icon: HistoryIcon }, // optional
-];
-
-const staffItems = [
-  { to: "/enrollment", labelKey: "menu.enrollment", icon: GraduationCapIcon },
-  { to: "/enrollment/guardians", labelKey: "menu.guardians", icon: UsersRoundIcon },
-  { to: "/attendance/sessions", labelKey: "menu.attendance", icon: ClipboardCheckIcon },
-  { to: "/attendance/take", labelKey: "menu.takeAttendance", icon: CheckSquareIcon },
-];
-
-const items = roles.includes("ADMIN") ? adminItems : staffItems;
-4) API Client & Helpers
-src/lib/api.ts
-ts
-Copier le code
-import ky from "ky";
-
-export const api = ky.create({
-  prefixUrl: import.meta.env.VITE_API_BASE_URL,
-  credentials: "include",
-  headers: { "Content-Type": "application/json" },
-});
-
-async function normalizeError(e: any) {
-  const data = await e.response?.json().catch(()=>null);
-  throw new Error(data?.error?.message ?? e.message ?? "Request failed");
-}
-
-export async function get<T>(url: string): Promise<T> {
-  try { return await api.get(url).json<T>(); } catch (e:any){ await normalizeError(e); }
-}
-export async function post<T>(url: string, body?: unknown): Promise<T> {
-  try { return await api.post(url, { json: body }).json<T>(); } catch (e:any){ await normalizeError(e); }
-}
-export async function patch<T>(url: string, body?: unknown): Promise<T> {
-  try { return await api.patch(url, { json: body }).json<T>(); } catch (e:any){ await normalizeError(e); }
-}
-export async function del<T>(url: string): Promise<T> {
-  try { return await api.delete(url).json<T>(); } catch (e:any){ await normalizeError(e); }
-}
-src/lib/ui.ts (CSV export + utils)
-ts
-Copier le code
-export function downloadCSV<T extends object>(rows: T[], filename = "export.csv") {
-  if (!rows.length) return;
-  const headers = Object.keys(rows[0] as any);
-  const csv =
-    [headers.join(","), ...rows.map(r => headers.map(h => escapeCSV((r as any)[h])).join(","))].join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-}
-function escapeCSV(v: any) {
-  if (v == null) return "";
-  const s = String(v).replace(/"/g,'""');
-  return /[",\n]/.test(s) ? `"${s}"` : s;
-}
-5) DataGrid (TanStack Table) with Filters & CSV
-src/components/DataGrid.tsx
 tsx
 Copier le code
 import * as React from "react";
-import { useReactTable, getCoreRowModel, getFilteredRowModel, getPaginationRowModel, flexRender, ColumnDef } from "@tanstack/react-table";
+import { searchGlobal } from "../api";
+import { useNavigate } from "react-router-dom";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { downloadCSV } from "@/lib/ui";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Loader2 } from "lucide-react";
 
-type Props<T extends object> = {
-  columns: ColumnDef<T, any>[];
-  data: T[];
-  filterPlaceholder?: string;
-  csvName?: string;
-};
+type Props = { open: boolean; onOpenChange: (v:boolean)=>void };
 
-export function DataGrid<T extends object>({ columns, data, filterPlaceholder="Filtrer…", csvName="export.csv" }: Props<T>) {
-  const [globalFilter, setGlobalFilter] = React.useState("");
-  const table = useReactTable({
-    data, columns,
-    state: { globalFilter },
-    onGlobalFilterChange: setGlobalFilter,
-    getCoreRowModel: getCoreRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-  });
+export default function SearchDialog({ open, onOpenChange }: Props){
+  const [q, setQ] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [data, setData] = React.useState<any>({});
+  const nav = useNavigate();
+
+  React.useEffect(() => {
+    function onKey(e: KeyboardEvent){
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k"){
+        e.preventDefault(); onOpenChange(true);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onOpenChange]);
+
+  async function run(){
+    if (q.trim().length < 2) return;
+    setLoading(true);
+    try {
+      const res = await searchGlobal({ q, types: "users,students,teachers,sections", limit: 8 });
+      setData(res);
+    } finally { setLoading(false); }
+  }
+
+  function go(path: string){
+    onOpenChange(false);
+    nav(path);
+  }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <Input value={globalFilter ?? ""} onChange={e=>setGlobalFilter(e.target.value)} placeholder={filterPlaceholder}/>
-        <Button variant="outline" onClick={()=>downloadCSV(table.getFilteredRowModel().rows.map(r => r.original), csvName)}>CSV</Button>
-      </div>
-
-      <div className="rounded-md border overflow-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-muted">
-            {table.getHeaderGroups().map(hg=>(
-              <tr key={hg.id}>
-                {hg.headers.map(h=>(
-                  <th key={h.id} className="px-3 py-2 text-left font-medium">
-                    {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
-                  </th>
-                ))}
-              </tr>
-            ))}
-          </thead>
-          <tbody>
-            {table.getRowModel().rows.map(r=>(
-              <tr key={r.id} className="border-t">
-                {r.getVisibleCells().map(c=>(
-                  <td key={c.id} className="px-3 py-2">
-                    {flexRender(c.column.columnDef.cell, c.getContext())}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-muted-foreground">
-          {table.getFilteredRowModel().rows.length} résultats
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl p-0">
+        <div className="p-3 border-b">
+          <Input autoFocus value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter" && run()} placeholder="Search users, students, sections…" />
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={()=>table.previousPage()} disabled={!table.getCanPreviousPage()}>Précédent</Button>
-          <Button variant="outline" size="sm" onClick={()=>table.nextPage()} disabled={!table.getCanNextPage()}>Suivant</Button>
-        </div>
-      </div>
-    </div>
+        <ScrollArea className="max-h-[60vh] p-3">
+          {loading ? <div className="p-4 flex items-center gap-2 text-sm"><Loader2 className="h-4 w-4 animate-spin" /> Searching…</div> : (
+            <div className="grid md:grid-cols-2 gap-3">
+              {data.users?.length ? (
+                <div>
+                  <div className="text-xs uppercase text-muted-foreground mb-1">Users</div>
+                  <ul className="space-y-1">
+                    {data.users.map((u:any)=>(
+                      <li key={u.id} className="p-2 rounded hover:bg-muted cursor-pointer"
+                          onClick={()=>go(`/users/${u.id}`)}>
+                        {u.email ?? u.loginId ?? u.id}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {data.students?.length ? (
+                <div>
+                  <div className="text-xs uppercase text-muted-foreground mb-1">Students</div>
+                  <ul className="space-y-1">
+                    {data.students.map((s:any)=>(
+                      <li key={s.profileId} className="p-2 rounded hover:bg-muted cursor-pointer"
+                          onClick={()=>go(`/students/${s.profileId}`)}>
+                        {s.firstName} {s.lastName}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {data.teachers?.length ? (
+                <div>
+                  <div className="text-xs uppercase text-muted-foreground mb-1">Teachers</div>
+                  <ul className="space-y-1">
+                    {data.teachers.map((t:any)=>(
+                      <li key={t.profileId} className="p-2 rounded hover:bg-muted cursor-pointer"
+                          onClick={()=>go(`/teachers/${t.profileId}`)}>
+                        {t.firstName} {t.lastName}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {data.sections?.length ? (
+                <div>
+                  <div className="text-xs uppercase text-muted-foreground mb-1">Sections</div>
+                  <ul className="space-y-1">
+                    {data.sections.map((c:any)=>(
+                      <li key={c.id} className="p-2 rounded hover:bg-muted cursor-pointer"
+                          onClick={()=>go(`/academics/sections?focus=${c.id}`)}>
+                        {c.name}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {!loading && !data.users?.length && !data.students?.length && !data.teachers?.length && !data.sections?.length && q &&
+                <div className="text-sm text-muted-foreground px-2">No matches</div>}
+            </div>
+          )}
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
   );
 }
-Column-level filters can be added by setting column.getFilterFn() and rendering per-column inputs in the header; the global filter above covers most MVP needs.
-
-6) Feature Pages (API-connected)
-Keep pages simple first: DataGrid + dialogs + forms. Add filters/pagination later as needed.
-
-Module 1 — Identity
-UsersList: GET /admin/users → DataGrid (id, email/loginId, roles, active/locked). Bulk actions optional.
-
-UserCreate: Admin: email/password; others: name only. POST /admin/users → show CopyableSecret { loginId, secret } (once).
-
-UserDetail: GET /admin/users/:id (+ profile). Actions: Reset Secret, Rotate loginId, Activate/Deactivate, Edit Profile.
-
-Module 2 — Academics
-Stages: CRUD /academics/education-stages
-
-GradeLevels: CRUD /academics/grade-levels?stageId=
-
-YearsTerms: CRUD /academics/academic-years, /academics/terms?academicYearId=
-
-Subjects: CRUD /academics/subjects?stageId=
-
-Sections: CRUD /academics/class-sections + manage subjects (POST /academics/class-sections/:id/subjects)
-
-Module 3 — Enrollment
-Enrollments: Enroll / Transfer / Withdraw via /enrollment/* endpoints; Section roster: /enrollment/class-sections/:id/students.
-
-GuardianLinks: Link/unlink guardians; list both directions.
-
-Module 4 — Teaching
-Assignments: CRUD /teaching/assignments; Set homeroom: /teaching/class-sections/:id/homeroom.
-
-Module 5 — Attendance
-Sessions: create/list/finalize via /attendance/*.
-
-TakeAttendance: Day roster → GET /attendance/sections/:id/roster?date=... then bulk mark POST /attendance/sessions/:id/records.
-
-7) Global Search (Command Palette)
-UI: src/app/shell/SearchDialog.tsx
-Use a shadcn Command dialog (<CommandDialog/>) bound to ⌘K / Ctrl+K.
-
-Query minimal datasets concurrently and list grouped results.
+4) Pages
+4.1 Audit Timeline (infinite scroll + filters + CSV)
+src/features/admin-utils/pages/AuditTimeline.tsx
 
 tsx
 Copier le code
-// pseudo-implementation
-const queries = await Promise.all([
-  get<{id:string; email?:string; loginId?:string}[]>("admin/users"),
-  get<{id:string; name:string}[]>("academics/class-sections"),
-  get<{id:string; firstName:string; lastName:string}[]>("enrollment/students?shape=list") // or build from users+roles
-]);
-// Render groups: Users, Sections, Students. On select → navigate to detail page.
-If you need server-side search later, add dedicated ?q= endpoints; for now, client-side fuzzy filter works for small datasets.
+import * as React from "react";
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { fetchAudit } from "../api";
+import AuditFilters from "../components/AuditFilters";
+import AuditEventCard from "../components/AuditEventCard";
+import { Button } from "@/components/ui/button";
+import { downloadCSV } from "@/lib/ui";
+import { Loader2 } from "lucide-react";
 
-8) i18n (French-first)
-src/lib/i18n.ts
-ts
-Copier le code
-import i18n from "i18next";
-import { initReactI18next } from "react-i18next";
-
-const fr = {
-  menu: {
-    users: "Utilisateurs",
-    stages: "Étapes",
-    gradeLevels: "Niveaux",
-    yearsTerms: "Années & Trimestres",
-    subjects: "Matières",
-    sections: "Classes",
-    enrollment: "Inscriptions",
-    guardians: "Parents/Tuteurs",
-    assignments: "Affectations",
-    attendance: "Présences",
-    takeAttendance: "Prendre la présence",
-    audit: "Historique",
-  },
-  actions: {
-    create: "Créer",
-    save: "Enregistrer",
-    cancel: "Annuler",
-    exportCsv: "Exporter CSV",
-  },
-  auth: {
-    email: "Email",
-    password: "Mot de passe",
-    signIn: "Connexion",
-  },
-};
-
-const en = { /* minimal English fallback if needed */ };
-
-i18n.use(initReactI18next).init({
-  resources: { fr: { translation: fr }, en: { translation: en } },
-  lng: "fr", fallbackLng: "en", interpolation: { escapeValue: false },
-});
-
-export default i18n;
-Use t("menu.users") etc. Labels in components reference translation keys.
-
-9) PWA & Offline (attendance-focused)
-vite.config.ts (plugin only)
-ts
-Copier le code
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-import { VitePWA } from "vite-plugin-pwa";
-
-export default defineConfig({
-  plugins: [
-    react(),
-    VitePWA({
-      registerType: "autoUpdate",
-      includeAssets: ["favicon.svg"],
-      manifest: {
-        name: "School Admin",
-        short_name: "School",
-        start_url: "/",
-        display: "standalone",
-        background_color: "#0b0b0c",
-        theme_color: "#0ea5e9",
-        icons: [
-          { src: "/pwa-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/pwa-512.png", sizes: "512x512", type: "image/png" }
-        ],
-      },
-      workbox: {
-        runtimeCaching: [
-          // Cache GET attendance endpoints for quick backfill
-          {
-            urlPattern: ({url}) => url.pathname.startsWith("/api/attendance/"),
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "attendance-cache",
-              expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 },
-            },
-          },
-          // Images/CSS/JS default
-          {
-            urlPattern: ({request}) => ["style","script","image"].includes(request.destination),
-            handler: "StaleWhileRevalidate",
-            options: { cacheName: "assets-cache" },
-          },
-        ],
-      },
-    }),
-  ],
-});
-Simple POST retry queue for attendance
-src/lib/offlineQueue.ts
-
-ts
-Copier le code
-type Pending = { url: string; body: unknown; ts: number };
-
-const KEY = "attendance-queue";
-
-export function enqueue(url: string, body: unknown){
-  const q: Pending[] = JSON.parse(localStorage.getItem(KEY) || "[]");
-  q.push({ url, body, ts: Date.now() });
-  localStorage.setItem(KEY, JSON.stringify(q));
-}
-
-export async function flushIfOnline(){
-  if (!navigator.onLine) return;
-  const q: Pending[] = JSON.parse(localStorage.getItem(KEY) || "[]");
-  const keep: Pending[] = [];
-  for (const item of q){
-    try {
-      const res = await fetch(item.url, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(item.body),
-      });
-      if (!res.ok) throw new Error("failed");
-    } catch {
-      keep.push(item); // try again later
-    }
+function groupByDate(items: any[]) {
+  const map = new Map<string, any[]>();
+  for (const it of items) {
+    const d = new Date(it.at);
+    const key = d.toISOString().slice(0,10); // YYYY-MM-DD
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(it);
   }
-  localStorage.setItem(KEY, JSON.stringify(keep));
+  return Array.from(map.entries()).sort((a,b)=> a[0] < b[0] ? 1 : -1);
 }
 
-// attach listeners once (e.g., in App.tsx)
-window.addEventListener("online", () => { flushIfOnline(); });
-Usage: when calling POST /attendance/sessions/:id/records, if it fails with network error, call enqueue(url, body) and toast “enregistré hors ligne; sera envoyé plus tard”.
+export default function AuditTimeline(){
+  const [filters, setFilters] = React.useState<any>({});
+  const qKey = ["audit", filters];
 
-10) Audit Log Timeline (optional but included in UI)
-If your backend exposes GET /api/admin/audit?entityType=&entityId=&limit=... returning a list like:
+  const query = useInfiniteQuery({
+    queryKey: qKey,
+    queryFn: ({ pageParam }) => fetchAudit({ ...filters, ...(pageParam ?? {}) }),
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
+    initialPageParam: undefined as any,
+  });
+
+  const pages = query.data?.pages ?? [];
+  const all = pages.flatMap(p => p.items);
+  const groups = groupByDate(all);
+
+  function exportCsv(){
+    downloadCSV(all.map(i => ({
+      id: i.id, at: i.at, action: i.action, entityType: i.entityType, entityId: i.entityId,
+      actorUserId: i.actorUserId, ip: i.ip, summary: i.summary
+    })), "audit.csv");
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Audit</h1>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={exportCsv}>Export CSV</Button>
+          <Button variant="outline" onClick={()=>query.refetch()}>Refresh</Button>
+        </div>
+      </div>
+
+      <AuditFilters onApply={(f)=>{ setFilters(f); }} className="mb-2" />
+
+      {query.isLoading ? (
+        <div className="p-8 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
+      ) : (
+        <div className="space-y-6">
+          {groups.map(([day, items]) => (
+            <section key={day} className="space-y-2">
+              <div className="text-sm font-semibold">{new Date(day).toLocaleDateString()}</div>
+              <div className="grid gap-2">
+                {items.map((it:any)=> <AuditEventCard key={it.id} item={it} />)}
+              </div>
+            </section>
+          ))}
+          {query.hasNextPage && (
+            <div className="flex justify-center pt-2">
+              <Button onClick={()=>query.fetchNextPage()} disabled={query.isFetchingNextPage}>
+                {query.isFetchingNextPage ? "Loading…" : "Load more"}
+              </Button>
+            </div>
+          )}
+          {!query.hasNextPage && all.length > 0 && (
+            <div className="text-center text-xs text-muted-foreground py-2">No more results</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+4.2 Global Search Page (tabs + grids + CSV)
+src/features/admin-utils/pages/SearchPage.tsx
+
+tsx
+Copier le code
+import * as React from "react";
+import { searchGlobal } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { downloadCSV } from "@/lib/ui";
+import { Link } from "react-router-dom";
+
+export default function SearchPage(){
+  const [q, setQ] = React.useState("");
+  const [types, setTypes] = React.useState("users,students,teachers,sections");
+  const query = useQuery({
+    queryKey: ["admin-search", q, types],
+    queryFn: () => searchGlobal({ q, types, limit: 50 }),
+    enabled: q.trim().length >= 2
+  });
+
+  const data = query.data ?? {};
+  const tabs = [
+    ["users", data.users ?? []],
+    ["students", data.students ?? []],
+    ["teachers", data.teachers ?? []],
+    ["sections", data.sections ?? []],
+  ] as const;
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-xl font-semibold">Global Search</h1>
+
+      <div className="flex gap-2 items-center">
+        <Input value={q} onChange={e=>setQ(e.target.value)} placeholder="Type at least 2 characters…" className="max-w-lg" />
+        <Button variant="outline" onClick={() => q && query.refetch()} disabled={q.trim().length < 2}>Search</Button>
+        <Button variant="outline" onClick={() => {
+          const flat = [
+            ...(data.users ?? []).map((x:any)=>({ bucket:"user", id:x.id, label:x.email ?? x.loginId ?? x.id })),
+            ...(data.students ?? []).map((x:any)=>({ bucket:"student", id:x.profileId, label:`${x.firstName} ${x.lastName}` })),
+            ...(data.teachers ?? []).map((x:any)=>({ bucket:"teacher", id:x.profileId, label:`${x.firstName} ${x.lastName}` })),
+            ...(data.sections ?? []).map((x:any)=>({ bucket:"section", id:x.id, label:x.name })),
+          ];
+          downloadCSV(flat, "search.csv");
+        }}>Export CSV</Button>
+      </div>
+
+      <Tabs defaultValue="users">
+        <TabsList>
+          {tabs.map(([k, arr])=>(
+            <TabsTrigger key={k} value={k}>{k} ({arr.length})</TabsTrigger>
+          ))}
+        </TabsList>
+
+        <TabsContent value="users">
+          <div className="rounded border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted">
+                <tr><th className="px-3 py-2 text-start">ID</th><th className="px-3 py-2 text-start">Email</th><th className="px-3 py-2 text-start">Login ID</th></tr>
+              </thead>
+              <tbody>
+                {(data.users ?? []).map((u:any)=>(
+                  <tr key={u.id} className="border-t hover:bg-muted/40">
+                    <td className="px-3 py-2"><Link className="underline" to={`/users/${u.id}`}>{u.id}</Link></td>
+                    <td className="px-3 py-2">{u.email ?? "—"}</td>
+                    <td className="px-3 py-2">{u.loginId ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="students">
+          <div className="rounded border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted">
+                <tr><th className="px-3 py-2 text-start">Profile</th><th className="px-3 py-2 text-start">Name</th></tr>
+              </thead>
+              <tbody>
+                {(data.students ?? []).map((s:any)=>(
+                  <tr key={s.profileId} className="border-t hover:bg-muted/40">
+                    <td className="px-3 py-2"><Link className="underline" to={`/students/${s.profileId}`}>{s.profileId}</Link></td>
+                    <td className="px-3 py-2">{s.firstName} {s.lastName}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="teachers">
+          <div className="rounded border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted">
+                <tr><th className="px-3 py-2 text-start">Profile</th><th className="px-3 py-2 text-start">Name</th></tr>
+              </thead>
+              <tbody>
+                {(data.teachers ?? []).map((t:any)=>(
+                  <tr key={t.profileId} className="border-t hover:bg-muted/40">
+                    <td className="px-3 py-2"><Link className="underline" to={`/teachers/${t.profileId}`}>{t.profileId}</Link></td>
+                    <td className="px-3 py-2">{t.firstName} {t.lastName}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="sections">
+          <div className="rounded border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted">
+                <tr><th className="px-3 py-2 text-start">ID</th><th className="px-3 py-2 text-start">Name</th></tr>
+              </thead>
+              <tbody>
+                {(data.sections ?? []).map((c:any)=>(
+                  <tr key={c.id} className="border-t hover:bg-muted/40">
+                    <td className="px-3 py-2"><Link className="underline" to={`/academics/sections?focus=${c.id}`}>{c.id}</Link></td>
+                    <td className="px-3 py-2">{c.name}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+5) Router & Shell Integration
+5.1 Routes
+Add both pages to your router behind guards:
+
+tsx
+Copier le code
+// src/app/router.tsx (excerpt)
+import AuditTimeline from "@/features/admin-utils/pages/AuditTimeline";
+import SearchPage from "@/features/admin-utils/pages/SearchPage";
+import { RequireAdmin, RequireStaffOrAdmin } from "./guards";
+
+{
+  element: <RequireAdmin />, children: [
+    { path: "audit", element: <AuditTimeline /> },
+  ]
+},
+{
+  element: <RequireStaffOrAdmin />, children: [
+    { path: "search", element: <SearchPage /> },
+  ]
+}
+5.2 Sidebar & Header
+Add “Audit” (ADMIN only) and “Search” (ADMIN/STAFF) entries in Sidebar.
+
+Mount SearchDialog in Header and wire ⌘K / Ctrl+K:
+
+tsx
+Copier le code
+// src/app/shell/Header.tsx (excerpt)
+import SearchDialog from "@/features/admin-utils/components/SearchDialog";
+const [open, setOpen] = useState(false);
+<LanguageSwitcher />
+<Button variant="outline" onClick={()=>setOpen(true)}>⌘K</Button>
+<SearchDialog open={open} onOpenChange={setOpen} />
+6) i18n Keys (add to fr/en/ar)
+src/locales/fr.json
 
 json
 Copier le code
-[{ "id":"...", "at":"2025-06-01T10:00:00Z", "who":"userId", "action":"ENROLL_CREATE", "summary":"Inscription de Amina en 2nde A", "meta":{...}}]
-render it as a vertical timeline with day grouping. If the endpoint is absent, hide the menu entry.
-
-src/features/audit/pages/AuditTimeline.tsx (sketch)
-
-tsx
-Copier le code
-import { useQuery } from "@tanstack/react-query";
-import { get } from "@/lib/api";
-
-export default function AuditTimeline(){
-  const { data } = useQuery({ queryKey: ["audit"], queryFn: () => get<any[]>("admin/audit?limit=200") });
-  if (!data) return null;
-  return (
-    <div className="space-y-4">
-      {data.map(ev=>(
-        <div key={ev.id} className="flex gap-3">
-          <div className="mt-1 h-2 w-2 rounded-full bg-primary" />
-          <div>
-            <div className="text-sm">{new Date(ev.at).toLocaleString()}</div>
-            <div className="font-medium">{ev.summary}</div>
-            {ev.meta && <pre className="text-xs text-muted-foreground">{JSON.stringify(ev.meta, null, 2)}</pre>}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+{
+  "audit": {
+    "title": "Historique",
+    "filters": { "action":"Action", "entity":"Entité", "actor":"Acteur", "from":"Du", "to":"Au", "search":"Recherche", "apply":"Appliquer" },
+    "exportCsv": "Exporter CSV",
+    "refresh": "Rafraîchir",
+    "loadMore": "Charger plus",
+    "noMore": "Plus de résultats"
+  },
+  "search": {
+    "title": "Recherche globale",
+    "placeholder": "Saisir au moins 2 caractères…",
+    "exportCsv": "Exporter CSV",
+    "users":"Utilisateurs",
+    "students":"Élèves",
+    "teachers":"Enseignants",
+    "sections":"Classes",
+    "noMatches":"Aucun résultat"
+  }
 }
-11) Auth (Sign-In page)
-Form (email, password) → POST /auth/login-email
+Mirror the same keys in en.json and ar.json (RTL handled globally).
 
-On success: invalidate ["me"], navigate to /
+Replace hard-coded English strings in components with t("audit.*")/t("search.*") if you want full localization now.
 
-UI: shadcn Card, Form, Input, Button, show errors via sonner toast.
+7) UX Notes
+Audit: Keep meta collapsed if large; here we show it inline for simplicity.
 
-tsx
-Copier le code
-// simplified submit
-await post("auth/login-email", { email, password });
-toast.success("Bienvenue !");
-queryClient.invalidateQueries({ queryKey: ["me"] });
-navigate("/");
-12) Role-Based Access Summary
-ADMIN: full menu & pages.
+Search: The page supports CSV export; the palette is for quick nav.
 
-STAFF: Enrollment + Attendance (read/write), read-only Academics listing if desired.
+For big datasets, switch to server-side paging (the APIs already support limits).
 
-Guards:
+8) Manual Tests
+Log in as ADMIN.
 
-Routes under /teaching/* and /academics/* can be wrapped in <RequireAdmin/>.
+Go to /audit — you should see recent actions (create a user/enrollment to generate).
 
-Enrollment/Attendance can be wrapped in <RequireStaffOrAdmin/>.
+Filter by action=ENROLL_CREATE, set a date range, and Apply. Verify results tighten.
 
-13) Definition of Done (Client)
- All API calls use credentials: "include"; 401 → redirect to /sign-in.
+Click Load more until No more results.
 
- AppShell with role-based Sidebar; Header includes Search (⌘K) and theme toggle.
+Click Export CSV and open the file; columns should be populated.
 
- Identity screens: list/create/detail; reset secret; rotate loginId; status toggle; profile edit.
+Open /search, type “am” (≥2 chars), verify results in each tab.
 
- Academics screens: stages, grade levels, years/terms, subjects, sections (+ manage section subjects).
+Use ⌘K / Ctrl+K and search “sec” → select a section to navigate.
 
- Enrollment: enroll/transfer/withdraw; roster; guardian links.
+9) Definition of Done (Client Module 6)
+ Route /audit (ADMIN) with filters, infinite pagination, CSV export.
 
- Teaching: assignments CRUD; set homeroom.
+ Route /search (ADMIN/STAFF) with multi-bucket results and CSV export.
 
- Attendance: sessions CRUD; take attendance with roster; bulk mark.
+ Command palette bound to ⌘K/Ctrl+K using /admin/search.
 
- DataGrid provides global filter + CSV export for tables.
+ Error states handled (toasts/snackbars if you prefer).
 
- Global search across users/sections/students with Command dialog.
+ i18n keys added; RTL behaves under Arabic.
 
- i18n: French labels, English fallback.
+ Menu visibility respects RBAC.
 
- PWA: installable; GET attendance endpoints cached; offline queue for POST records.
+10) Future Enhancements
+Add column filters and sorting to the audit list with TanStack Table if you prefer a grid view.
 
- (If backend supports) Audit timeline visible and populated.
+Add entity/action dropdowns fed by /admin/audit?distinct=entityType|action.
 
-14) Notes
-For larger datasets, move search/filter server-side (add ?q=&limit=&cursor= to your APIs).
+Deep links from audit rows to the affected entity detail pages.
 
-If you later allow teacher logins, reuse the same app with route guards to expose only their assignments & attendance.
-
-Extend the offline queue to use IndexedDB and backoff if you expect prolonged offline usage.
+Save/restore last-used filters in localStorage.

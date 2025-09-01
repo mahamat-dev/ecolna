@@ -5,19 +5,27 @@ import { History, User, Calendar, Info } from 'lucide-react';
 interface AuditEvent extends Record<string, unknown> {
   id: string;
   at: string;
-  who: string;
+  actorUserId: string | null;
   action: string;
   summary: string;
   entityType?: string;
   entityId?: string;
   meta?: Record<string, unknown>;
+  actorRoles?: string[] | null;
+  ip?: string | null;
 }
 
 export function AuditTimeline() {
-  const { data: events = [], isLoading, error } = useQuery({
-    queryKey: ['audit'],
-    queryFn: () => get<AuditEvent[]>('admin/audit?limit=200'),
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['audit', { limit: 200 }],
+    queryFn: () =>
+      get<{
+        items: AuditEvent[];
+        nextCursor: { cursorAt: string | null; cursorId: string | null } | null;
+      }>('admin/audit?limit=200'),
   });
+
+  const events: AuditEvent[] = data?.items ?? [];
 
   if (isLoading) {
     return (
@@ -158,7 +166,7 @@ export function AuditTimeline() {
                         <div className="flex items-center gap-4 text-sm text-gray-500">
                           <div className="flex items-center gap-1">
                             <User className="h-4 w-4" />
-                            <span>Utilisateur: {event.who}</span>
+                            <span>Utilisateur: {event.actorUserId ?? '—'}</span>
                           </div>
                           {event.entityType && (
                             <span>Type: {event.entityType}</span>

@@ -10,6 +10,7 @@ import {
   GraduationCapIcon,
   ClipboardListIcon,
   CheckSquareIcon,
+  HistoryIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   MenuIcon
@@ -88,6 +89,12 @@ export function Sidebar() {
         { name: t('menu.attendance'), path: '/attendance/sessions', labelKey: 'menu.attendance' },
         { name: t('menu.takeAttendance'), path: '/attendance/take', labelKey: 'menu.takeAttendance' }
       ]
+    },
+    {
+      icon: <HistoryIcon />,
+      name: t('menu.audit'),
+      labelKey: 'menu.audit',
+      path: '/audit'
     }
   ];
 
