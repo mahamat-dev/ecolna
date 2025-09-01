@@ -1,579 +1,604 @@
-# CLAUDE.md — Module 1: User Management (API-only, **Express 5**)
+# Module 2 — School & Academics Base (API-only, **Express 5 + Drizzle**)
 
-Single-institution School Management **API**  
-Stack: **Bun • Express 5 • Drizzle ORM (PostgreSQL)**
+Build the foundation for all academic features:
+- Define **stages → grade levels → class sections**.
+- Define **time**: academic years and terms.
+- Define **subjects** and attach them to class sections.
 
-**Credential policy (final)**
-- **Admins** sign in with **email + password**.
-- **Non-admins** (**STAFF**, **TEACHER**, **STUDENT**, **GUARDIAN**) sign in with **`login_id` + secret** (no email).
-- **Only admins** can create/reset/lock/unlock/activate/deactivate users.
-- **Users cannot change their own secret** (no self-service). No “first-login change”.
+> All endpoints require **ADMIN** (reuse Module 1 sessions + `requireAdmin`).  
+> No multi-tenant. Single institution.
 
 ---
 
 ## 0) Outcomes
 
-Ship a secure identity & RBAC layer:
-- DB schema: **users / user_roles / profiles** (+ optional role shells)
-- Session cookies; RBAC guards
-- Endpoints: `/auth/*`, `/admin/users*`, `/admin/profiles/:id`
-- Seed script for first admin
-- Tests via cURL/OpenAPI examples
+- New DB schema:  
+  `education_stage`, `grade_level`, `academic_year`, `term`,  
+  `subject`, `class_section`, `class_section_subject`.
+- CRUD endpoints for each entity + attach/remove subjects to a class section.
+- Validation & constraints: uniqueness, ordering, date ranges.
 
 ---
 
-## 1) Setup
+## 1) Database Design (Drizzle / Postgres)
 
-**.env**
-```env
-DATABASE_URL=postgres://app:app@127.0.0.1:5432/schooldb
-SESSION_SECRET=change_this_long_random_string
-PORT=4000
-NODE_ENV=development
-# Optional (prod): REDIS_URL=redis://127.0.0.1:6379
-Install
+### Entities & Relationships
 
-bash
-Copier le code
-bun add express@5 cors morgan express-session connect-redis ioredis
-bun add drizzle-orm postgres zod dotenv @node-rs/argon2 rate-limiter-flexible
-bun add -d drizzle-kit tsx @types/node @types/express@^5
-Drizzle config (drizzle.config.ts)
+- **education_stage** 1—* grade_level  
+- **academic_year** 1—* term  
+- **grade_level** + **academic_year** 1—* class_section  
+- **class_section** *—* **subject** (via `class_section_subject`)
 
-ts
-Copier le code
-import 'dotenv/config';
-import { defineConfig } from 'drizzle-kit';
-export default defineConfig({
-  dialect: 'postgresql',
-  out: './drizzle',
-  schema: './src/db/schema/**/*.ts',
-  dbCredentials: { url: process.env.DATABASE_URL! },
-  strict: true,
-  verbose: true,
+### Tables
+
+#### `education_stage`
+| column        | type   | notes                                 |
+|---------------|--------|----------------------------------------|
+| `id`          | uuid   | PK, `default gen_random_uuid()`        |
+| `code`        | text   | **UNIQUE**, e.g., `PRIMAIRE`, `LYCEE`  |
+| `name`        | text   | display name                           |
+| `order_index` | int    | for sorting                            |
+| `is_active`   | bool   | default `true`                         |
+
+#### `grade_level`
+| column        | type | notes                                                      |
+|---------------|------|------------------------------------------------------------|
+| `id`          | uuid | PK                                                         |
+| `stage_id`    | uuid | **FK → education_stage(id) ON DELETE RESTRICT**           |
+| `code`        | text | e.g., `CP1`, `SECONDE`, `TERMINALE`                        |
+| `name`        | text | display name                                               |
+| `order_index` | int  | for sorting within stage                                  |
+| **unique**    |      | `(stage_id, code)`                                         |
+
+#### `academic_year`
+| column       | type        | notes                                      |
+|--------------|-------------|--------------------------------------------|
+| `id`         | uuid        | PK                                         |
+| `code`       | text        | **UNIQUE**, e.g., `2025-2026`              |
+| `starts_on`  | date        |                                            |
+| `ends_on`    | date        | must be > `starts_on`                      |
+| `is_active`  | bool        | default `true` (you can later enforce 1 active) |
+
+#### `term`
+| column             | type | notes                                           |
+|--------------------|------|-------------------------------------------------|
+| `id`               | uuid | PK                                              |
+| `academic_year_id` | uuid | **FK → academic_year(id) ON DELETE CASCADE**   |
+| `name`             | text | e.g., `Trimestre 1`, `Semestre 2`               |
+| `starts_on`        | date | must be within year range                       |
+| `ends_on`          | date | `ends_on > starts_on`                           |
+| `order_index`      | int  | for sorting                                     |
+| **unique**         |      | `(academic_year_id, name)`                      |
+
+#### `subject`
+| column    | type | notes                                           |
+|-----------|------|--------------------------------------------------|
+| `id`      | uuid | PK                                              |
+| `code`    | text | **UNIQUE**, e.g., `MATH`, `ENG`, `PHYS`         |
+| `name`    | text | display name                                    |
+| `stage_id`| uuid | nullable FK → `education_stage(id)` (optional)  |
+| `is_active`| bool| default `true`                                  |
+
+#### `class_section`
+Represents a concrete class in a given academic year (e.g., **2nde A (2025–2026)**).
+
+| column             | type | notes                                                                    |
+|--------------------|------|--------------------------------------------------------------------------|
+| `id`               | uuid | PK                                                                       |
+| `academic_year_id` | uuid | FK → academic_year(id)                                                   |
+| `grade_level_id`   | uuid | FK → grade_level(id)                                                     |
+| `name`             | text | e.g., `A`, `B`, `Science`, `Général`                                     |
+| `capacity`         | int  | optional                                                                 |
+| `room`             | text | optional                                                                 |
+| `is_active`        | bool | default `true`                                                           |
+| **unique**         |      | `(academic_year_id, grade_level_id, name)`                               |
+
+#### `class_section_subject` (junction)
+| column            | type | notes                                          |
+|-------------------|------|-----------------------------------------------|
+| `class_section_id`| uuid | FK → class_section(id) ON DELETE CASCADE      |
+| `subject_id`      | uuid | FK → subject(id) ON DELETE RESTRICT           |
+| **PK**            |      | `(class_section_id, subject_id)`              |
+
+---
+
+### Drizzle schema (drop-in)
+
+```ts
+// src/db/schema/academics.ts
+import { pgTable, uuid, text, integer, boolean, date } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { relations } from 'drizzle-orm';
+/* If enums are needed later, add pgEnum here */
+
+export const educationStage = pgTable('education_stage', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  code: text('code').notNull().unique(),
+  name: text('name').notNull(),
+  orderIndex: integer('order_index').notNull().default(0),
+  isActive: boolean('is_active').notNull().default(true),
 });
-DB extension (once)
+
+export const gradeLevel = pgTable('grade_level', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  stageId: uuid('stage_id').notNull().references(() => educationStage.id, { onDelete: 'restrict' }),
+  code: text('code').notNull(),
+  name: text('name').notNull(),
+  orderIndex: integer('order_index').notNull().default(0),
+}, (t) => ({
+  uq: { columns: [t.stageId, t.code], name: 'uq_grade_level_stage_code' }
+}));
+
+export const academicYear = pgTable('academic_year', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  code: text('code').notNull().unique(), // e.g., 2025-2026
+  startsOn: date('starts_on').notNull(),
+  endsOn: date('ends_on').notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  /* Later: CHECK (starts_on < ends_on) — in generated SQL or a manual migration */
+});
+
+export const term = pgTable('term', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  academicYearId: uuid('academic_year_id').notNull()
+    .references(() => academicYear.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),            // Trimestre 1 / Semestre 2
+  startsOn: date('starts_on').notNull(),
+  endsOn: date('ends_on').notNull(),
+  orderIndex: integer('order_index').notNull().default(0),
+}, (t) => ({
+  uq: { columns: [t.academicYearId, t.name], name: 'uq_term_year_name' }
+}));
+
+export const subject = pgTable('subject', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  code: text('code').notNull().unique(),
+  name: text('name').notNull(),
+  stageId: uuid('stage_id').references(() => educationStage.id, { onDelete: 'set null' }),
+  isActive: boolean('is_active').notNull().default(true),
+});
+
+export const classSection = pgTable('class_section', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  academicYearId: uuid('academic_year_id').notNull()
+    .references(() => academicYear.id, { onDelete: 'cascade' }),
+  gradeLevelId: uuid('grade_level_id').notNull()
+    .references(() => gradeLevel.id, { onDelete: 'restrict' }),
+  name: text('name').notNull(), // e.g., A / B / Science
+  capacity: integer('capacity'),
+  room: text('room'),
+  isActive: boolean('is_active').notNull().default(true),
+}, (t) => ({
+  uq: { columns: [t.academicYearId, t.gradeLevelId, t.name], name: 'uq_class_section_triple' }
+}));
+
+export const classSectionSubject = pgTable('class_section_subject', {
+  classSectionId: uuid('class_section_id').notNull()
+    .references(() => classSection.id, { onDelete: 'cascade' }),
+  subjectId: uuid('subject_id').notNull()
+    .references(() => subject.id, { onDelete: 'restrict' }),
+}, (t) => ({
+  pk: { columns: [t.classSectionId, t.subjectId] }
+}));
+Optional CHECK constraints (add a manual SQL migration after generation):
 
 sql
 Copier le code
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-Drizzle commands
-
-bash
-Copier le code
-bun run db:gen
-bun run db:migrate
-bun run db:studio
-2) Database Design
-Enums
-role: ADMIN | STAFF | TEACHER | STUDENT | GUARDIAN
-
-auth_method: EMAIL | LOGIN_ID
-
-Tables (canonical)
-users
-column	type	constraints / notes
-id	uuid	PK, default gen_random_uuid()
-email	text	UNIQUE, admins only
-login_id	text	UNIQUE, non-admins only
-auth_method	auth_method	NOT NULL, default 'LOGIN_ID'
-password_hash	text	NOT NULL (argon2)
-is_active	boolean	NOT NULL, default true
-failed_logins	int	NOT NULL, default 0
-locked_until	timestamptz	nullable
-last_login_at	timestamptz	nullable
-secret_updated_at	timestamptz	default now()
-created_at	timestamptz	NOT NULL, default now()
-
-user_roles
-column	type	constraints
-user_id	uuid	FK → users(id) ON DELETE CASCADE
-role	role	NOT NULL
-PK (user_id, role)		
-
-profiles (one per human; may be linked to a user)
-column	type	constraints / notes
-id	uuid	PK, default gen_random_uuid()
-user_id	uuid	UNIQUE, FK → users(id) ON DELETE SET NULL
-first_name	text	NOT NULL
-last_name	text	NOT NULL
-phone	text	optional
-dob	timestamptz	optional
-photo_url	text	optional
-address	text	single free-text address
-city	text	optional
-region	text	optional
-country	text	default 'TD' (Chad)
-
-(Optional role shells to extend later)
-staff(profile_id PK, staff_no UNIQUE, position)
-student(profile_id PK, admission_no UNIQUE)
-guardian(profile_id PK, relationship)
-
-Drizzle schema (drop-in)
+ALTER TABLE academic_year
+  ADD CONSTRAINT chk_year_dates CHECK (starts_on < ends_on);
+ALTER TABLE term
+  ADD CONSTRAINT chk_term_dates CHECK (starts_on < ends_on);
+-- Ensure term inside year range (cannot be a plain CHECK, enforce in service or trigger)
+2) Seed (recommended for Chad structure)
 ts
 Copier le code
-// src/db/schema/identity.ts
-import { pgTable, uuid, text, boolean, timestamp, integer, pgEnum } from 'drizzle-orm/pg-core';
-import { sql } from 'drizzle-orm';
+// scripts/seed_academics.ts (outline)
+import { db } from '../src/db/client';
+import { educationStage, gradeLevel } from '../src/db/schema/academics';
+import { eq } from 'drizzle-orm';
 
-export const roleEnum = pgEnum('role', ['ADMIN','STAFF','TEACHER','STUDENT','GUARDIAN']);
-export const authEnum = pgEnum('auth_method', ['EMAIL','LOGIN_ID']);
+const stages = [
+  { code: 'PRIMAIRE', name: 'Primaire', orderIndex: 1 },
+  { code: 'SECONDAIRE', name: 'Secondaire/Collège', orderIndex: 2 },
+  { code: 'LYCEE', name: 'Lycée', orderIndex: 3 },
+  { code: 'UNIV', name: 'Université', orderIndex: 4 },
+];
 
-export const users = pgTable('users', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  email: text('email').unique(),
-  loginId: text('login_id').unique(),
-  authMethod: authEnum('auth_method').notNull().default('LOGIN_ID'),
-  passwordHash: text('password_hash').notNull(),
-  isActive: boolean('is_active').notNull().default(true),
-  failedLogins: integer('failed_logins').notNull().default(0),
-  lockedUntil: timestamp('locked_until', { withTimezone: true }),
-  lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
-  secretUpdatedAt: timestamp('secret_updated_at', { withTimezone: true }).defaultNow(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+const primaire = ['CP1','CP2','CE1','CE2','CM1','CM2'];
+const college  = ['6e','5e','4e','3e'];
+const lycee    = ['SECONDE','PREMIERE','TERMINALE'];
 
-export const userRoles = pgTable('user_roles', {
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  role: roleEnum('role').notNull(),
-}, (t) => ({ pk: { columns: [t.userId, t.role] }}));
+async function up(){
+  // insert stages
+  for(const s of stages){
+    await db.insert(educationStage).values(s).onConflictDoNothing();
+  }
+  const [stPrimaire] = await db.select().from(educationStage).where(eq(educationStage.code,'PRIMAIRE'));
+  const [stSecond]   = await db.select().from(educationStage).where(eq(educationStage.code,'SECONDAIRE'));
+  const [stLycee]    = await db.select().from(educationStage).where(eq(educationStage.code,'LYCEE'));
 
-export const profiles = pgTable('profiles', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  userId: uuid('user_id').unique().references(() => users.id, { onDelete: 'set null' }),
-  firstName: text('first_name').notNull(),
-  lastName: text('last_name').notNull(),
-  phone: text('phone'),
-  dob: timestamp('dob'),
-  photoUrl: text('photo_url'),
-  address: text('address'),
-  city: text('city'),
-  region: text('region'),
-  country: text('country').default('TD'),
-});
-
-// optional shells
-export const staff = pgTable('staff', {
-  profileId: uuid('profile_id').primaryKey().references(() => profiles.id, { onDelete: 'cascade' }),
-  staffNo: text('staff_no').unique(),
-  position: text('position'),
-});
-export const student = pgTable('student', {
-  profileId: uuid('profile_id').primaryKey().references(() => profiles.id, { onDelete: 'cascade' }),
-  admissionNo: text('admission_no').unique(),
-});
-export const guardian = pgTable('guardian', {
-  profileId: uuid('profile_id').primaryKey().references(() => profiles.id, { onDelete: 'cascade' }),
-  relationship: text('relationship'),
-});
-3) Middleware & Sessions (Express 5)
-CORS: origin: true, credentials: true
-
-JSON: express.json()
-
-Logging: morgan('dev')
-
-Sessions: express-session (cookie: httpOnly, SameSite='lax', Secure in prod, maxAge=8h).
-Use Redis store when REDIS_URL present; MemoryStore only for local dev.
-
-Rate limit: rate-limiter-flexible on /auth/*
-
-RBAC guards: requireAuth, requireAdmin
-
-Error handler: consistent JSON { error: { message, details? } }
-
-4) DTOs (zod)
+  // levels
+  let oi=1; for(const code of primaire)
+    await db.insert(gradeLevel).values({ stageId: stPrimaire.id, code, name: code, orderIndex: oi++ }).onConflictDoNothing();
+  oi=1; for(const code of college)
+    await db.insert(gradeLevel).values({ stageId: stSecond.id, code, name: code, orderIndex: oi++ }).onConflictDoNothing();
+  oi=1; for(const code of lycee)
+    await db.insert(gradeLevel).values({ stageId: stLycee.id, code, name: code, orderIndex: oi++ }).onConflictDoNothing();
+  console.log('Seeded stages & grade levels.');
+}
+up().catch(console.error);
+3) DTOs (Zod)
 ts
 Copier le code
-// src/modules/identity/dto.ts
+// src/modules/academics/dto.ts
 import { z } from 'zod';
 
-export const EmailLoginDto = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
+export const CreateStageDto = z.object({
+  code: z.string().min(2).max(32).toUpperCase(),
+  name: z.string().min(1).max(80),
+  orderIndex: z.number().int().min(0).default(0),
+  isActive: z.boolean().optional(),
 });
-export const IdLoginDto = z.object({
-  loginId: z.string().min(2),
-  secret: z.string().min(6),
-});
-export const CreateUserDto = z.object({
-  role: z.enum(['ADMIN','STAFF','TEACHER','STUDENT','GUARDIAN']),
-  email: z.string().email().optional(),      // required if role=ADMIN
-  password: z.string().min(8).optional(),    // required if role=ADMIN
-  firstName: z.string().min(1),
-  lastName: z.string().min(1),
-  phone: z.string().optional(),
-});
-export const UpdateStatusDto = z.object({ isActive: z.boolean() });
+export const UpdateStageDto = CreateStageDto.partial();
 
-export const UpdateProfileDto = z.object({
-  firstName: z.string().min(1).optional(),
-  lastName: z.string().min(1).optional(),
-  phone: z.string().optional(),
-  dob: z.coerce.date().optional(),
-  photoUrl: z.string().url().optional(),
-  address: z.string().max(200).optional(),
-  city: z.string().max(80).optional(),
-  region: z.string().max(80).optional(),
-  country: z.string().max(2).optional(), // e.g., "TD"
+export const CreateGradeLevelDto = z.object({
+  stageId: z.string().uuid(),
+  code: z.string().min(1).max(32),
+  name: z.string().min(1).max(80),
+  orderIndex: z.number().int().min(0).default(0),
 });
-5) Generators
+export const UpdateGradeLevelDto = CreateGradeLevelDto.partial();
+
+export const CreateAcademicYearDto = z.object({
+  code: z.string().regex(/^\d{4}-\d{4}$/),
+  startsOn: z.coerce.date(),
+  endsOn: z.coerce.date(),
+  isActive: z.boolean().optional(),
+}).refine(d => d.startsOn < d.endsOn, { message: 'startsOn must be before endsOn', path: ['endsOn'] });
+export const UpdateAcademicYearDto = CreateAcademicYearDto.partial();
+
+export const CreateTermDto = z.object({
+  academicYearId: z.string().uuid(),
+  name: z.string().min(1).max(64),
+  startsOn: z.coerce.date(),
+  endsOn: z.coerce.date(),
+  orderIndex: z.number().int().min(0).default(0),
+}).refine(d => d.startsOn < d.endsOn, { message: 'startsOn must be before endsOn', path: ['endsOn'] });
+export const UpdateTermDto = CreateTermDto.partial();
+
+export const CreateSubjectDto = z.object({
+  code: z.string().min(2).max(32).toUpperCase(),
+  name: z.string().min(1).max(80),
+  stageId: z.string().uuid().nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+export const UpdateSubjectDto = CreateSubjectDto.partial();
+
+export const CreateClassSectionDto = z.object({
+  academicYearId: z.string().uuid(),
+  gradeLevelId: z.string().uuid(),
+  name: z.string().min(1).max(64),
+  capacity: z.number().int().min(1).optional(),
+  room: z.string().max(64).optional(),
+  isActive: z.boolean().optional(),
+});
+export const UpdateClassSectionDto = CreateClassSectionDto.partial();
+
+export const SetSectionSubjectsDto = z.object({
+  subjectIds: z.array(z.string().uuid()).min(0),
+});
+4) Endpoints (spec)
+Base path: /api/academics/* — all requireAdmin.
+
+Education Stages
+POST /education-stages (CreateStageDto)
+
+GET /education-stages (list; optional ?active=bool)
+
+PATCH /education-stages/:id (UpdateStageDto)
+
+DELETE /education-stages/:id (only if no dependent grade levels)
+
+Grade Levels
+POST /grade-levels (CreateGradeLevelDto)
+
+GET /grade-levels?stageId= (filter by stage)
+
+PATCH /grade-levels/:id (UpdateGradeLevelDto)
+
+DELETE /grade-levels/:id (restrain if class sections exist)
+
+Academic Years
+POST /academic-years (CreateAcademicYearDto)
+
+GET /academic-years
+
+PATCH /academic-years/:id (UpdateAcademicYearDto)
+
+DELETE /academic-years/:id (only if no sections/terms)
+
+(Optional) when setting isActive=true, set others to false.
+
+Terms
+POST /terms (CreateTermDto) — validate inside year range
+
+GET /terms?academicYearId=
+
+PATCH /terms/:id (UpdateTermDto)
+
+DELETE /terms/:id
+
+Subjects
+POST /subjects (CreateSubjectDto)
+
+GET /subjects?stageId=&active=
+
+PATCH /subjects/:id (UpdateSubjectDto)
+
+DELETE /subjects/:id (only if not attached to sections)
+
+Class Sections
+POST /class-sections (CreateClassSectionDto)
+
+GET /class-sections?academicYearId=&gradeLevelId=
+
+PATCH /class-sections/:id (UpdateClassSectionDto)
+
+DELETE /class-sections/:id
+
+Class Section ↔ Subjects
+POST /class-sections/:id/subjects (SetSectionSubjectsDto)
+Replaces the full set of subjects for the section (idempotent).
+
+GET /class-sections/:id/subjects
+
+DELETE /class-sections/:id/subjects/:subjectId
+
+Error shape: { "error": { "message": "string", "details"?: any } }
+
+5) Routes (Express 5 — outline)
 ts
 Copier le code
-// src/modules/identity/codegen.ts
-const prefixes = { STUDENT: 'S', GUARDIAN: 'P', STAFF: 'STF', TEACHER: 'T' } as const;
-
-function randDigits(n:number){ let s=''; for(let i=0;i<n;i++) s+=Math.floor(Math.random()*10); return s; }
-
-export function makeLoginId(role:'STUDENT'|'GUARDIAN'|'STAFF'|'TEACHER'){
-  return `${prefixes[role] ?? 'U'}${randDigits(6)}`;  // e.g., S123456 / STF987654
-}
-
-export function randomSecret(n=12){
-  const c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-  let s=''; for(let i=0;i<n;i++) s+=c[Math.floor(Math.random()*c.length)]; return s;
-}
-6) Services
-ts
-Copier le code
-// src/modules/identity/service.ts
-import { db } from '../../db/client';
-import { users, userRoles, profiles } from '../../db/schema/identity';
-import { eq } from 'drizzle-orm';
-import { hash as argon2Hash, verify as argon2Verify } from '@node-rs/argon2';
-import { makeLoginId, randomSecret } from './codegen';
-
-export async function createAdmin(email:string, password:string, firstName:string, lastName:string, phone?:string){
-  const passwordHash = await argon2Hash(password);
-  const result = await db.transaction(async tx => {
-    const [u] = await tx.insert(users).values({ authMethod:'EMAIL', email, passwordHash, isActive:true }).returning();
-    await tx.insert(userRoles).values({ userId: u.id, role: 'ADMIN' });
-    const [p] = await tx.insert(profiles).values({ userId: u.id, firstName, lastName, phone: phone ?? null }).returning();
-    return { u, p };
-  });
-  return { userId: result.u.id, profileId: result.p.id };
-}
-
-export async function createNonAdmin(role:'STUDENT'|'GUARDIAN'|'STAFF'|'TEACHER', firstName:string, lastName:string, phone?:string){
-  const loginId = makeLoginId(role);
-  const secret = randomSecret(12);
-  const passwordHash = await argon2Hash(secret);
-
-  const result = await db.transaction(async tx => {
-    const [u] = await tx.insert(users).values({ authMethod:'LOGIN_ID', loginId, passwordHash, isActive:true }).returning();
-    await tx.insert(userRoles).values({ userId: u.id, role });
-    const [p] = await tx.insert(profiles).values({ userId: u.id, firstName, lastName, phone: phone ?? null }).returning();
-    return { u, p };
-  });
-  return { userId: result.u.id, profileId: result.p.id, loginId, secret }; // secret shown once
-}
-
-export async function verifyEmailLogin(email:string, password:string){
-  const [u] = await db.select().from(users).where(eq(users.email, email));
-  if(!u || u.authMethod !== 'EMAIL' || !u.isActive) return null;
-  if(u.lockedUntil && u.lockedUntil > new Date()) return null;
-  const ok = await argon2Verify(u.passwordHash, password);
-  return ok ? u : null;
-}
-
-export async function verifyIdLogin(loginId:string, secret:string){
-  const [u] = await db.select().from(users).where(eq(users.loginId, loginId));
-  if(!u || u.authMethod !== 'LOGIN_ID' || !u.isActive) return null;
-  if(u.lockedUntil && u.lockedUntil > new Date()) return null;
-  const ok = await argon2Verify(u.passwordHash, secret);
-  return ok ? u : null;
-}
-7) Routes (Express 5)
-ts
-Copier le code
-// src/modules/identity/routes.ts
+// src/modules/academics/routes.ts
 import { Router } from 'express';
 import { db } from '../../db/client';
-import { users, userRoles, profiles } from '../../db/schema/identity';
-import { eq } from 'drizzle-orm';
 import { validate } from '../../middlewares/validate';
-import { rateLimit } from '../../middlewares/rateLimit';
-import { requireAuth, requireAdmin } from '../../middlewares/rbac';
-import { EmailLoginDto, IdLoginDto, CreateUserDto, UpdateStatusDto, UpdateProfileDto } from './dto';
-import * as svc from './service';
-import { hash as argon2Hash } from '@node-rs/argon2';
-import { makeLoginId, randomSecret } from './codegen';
+import { requireAdmin } from '../../middlewares/rbac';
+import {
+  educationStage, gradeLevel, academicYear, term,
+  subject, classSection, classSectionSubject
+} from '../../db/schema/academics';
+import {
+  CreateStageDto, UpdateStageDto, CreateGradeLevelDto, UpdateGradeLevelDto,
+  CreateAcademicYearDto, UpdateAcademicYearDto, CreateTermDto, UpdateTermDto,
+  CreateSubjectDto, UpdateSubjectDto, CreateClassSectionDto, UpdateClassSectionDto,
+  SetSectionSubjectsDto
+} from './dto';
+import { and, eq, inArray } from 'drizzle-orm';
 
-export const identityRouter = Router();
+export const academicsRouter = Router();
+academicsRouter.use(requireAdmin);
 
-/* ---------- AUTH ---------- */
-identityRouter.post('/auth/login-email', rateLimit, validate(EmailLoginDto), async (req, res) => {
-  const u = await svc.verifyEmailLogin(req.body.email, req.body.password);
-  if(!u) return res.status(401).json({ error: { message: 'Invalid credentials' } });
-  const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  if(!roles.find(r => r.role === 'ADMIN')) return res.status(403).json({ error: { message: 'Admin only' } });
-  req.session.user = { id: u.id, email: u.email, roles: roles.map(r=>r.role) };
-  res.json({ userId: u.id, roles: roles.map(r=>r.role) });
+/* ---- Stages ---- */
+academicsRouter.post('/education-stages', validate(CreateStageDto), async (req, res) => {
+  const [row] = await db.insert(educationStage).values(req.body).returning();
+  res.status(201).json(row);
 });
-
-identityRouter.post('/auth/login-id', rateLimit, validate(IdLoginDto), async (req, res) => {
-  const u = await svc.verifyIdLogin(req.body.loginId, req.body.secret);
-  if(!u) return res.status(401).json({ error: { message: 'Invalid credentials' } });
-  const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  req.session.user = { id: u.id, loginId: u.loginId, roles: roles.map(r=>r.role) };
-  res.json({ userId: u.id, loginId: u.loginId, roles: roles.map(r=>r.role) });
-});
-
-identityRouter.post('/auth/logout', requireAuth, async (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
-});
-
-identityRouter.get('/me', async (req, res) => {
-  if(!req.session.user) return res.status(401).json({ error: { message: 'Not signed in' } });
-  const [p] = await db.select().from(profiles).where(eq(profiles.userId, req.session.user.id));
-  res.json({ user: req.session.user, profile: p ?? null });
-});
-
-/* ---------- ADMIN: USERS ---------- */
-identityRouter.post('/admin/users', requireAdmin, validate(CreateUserDto), async (req, res) => {
-  const { role, email, password, firstName, lastName, phone } = req.body;
-  if (role === 'ADMIN') {
-    if (!email || !password) return res.status(400).json({ error: { message: 'Admin requires email & password' } });
-    const out = await svc.createAdmin(email, password, firstName, lastName, phone);
-    return res.status(201).json({ ...out, email });
-  } else {
-    const out = await svc.createNonAdmin(role, firstName, lastName, phone);
-    return res.status(201).json(out); // includes loginId + secret (show once)
-  }
-});
-
-identityRouter.get('/admin/users', requireAdmin, async (_req, res) => {
-  const data = await db.select().from(users);
+academicsRouter.get('/education-stages', async (req, res) => {
+  const active = req.query.active;
+  const data = await db.select().from(educationStage)
+    .where(active === undefined ? undefined : eq(educationStage.isActive, active === 'true'))
+    .orderBy(educationStage.orderIndex);
   res.json(data);
 });
-
-identityRouter.get('/admin/users/:id', requireAdmin, async (req, res) => {
-  const [u] = await db.select().from(users).where(eq(users.id, req.params.id));
-  if(!u) return res.status(404).json({ error: { message: 'User not found' } });
-  const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  const [p] = await db.select().from(profiles).where(eq(profiles.userId, u.id));
-  res.json({ user: u, roles: roles.map(r=>r.role), profile: p ?? null });
+academicsRouter.patch('/education-stages/:id', validate(UpdateStageDto), async (req, res) => {
+  const [row] = await db.update(educationStage).set(req.body).where(eq(educationStage.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json(row);
 });
-
-identityRouter.patch('/admin/users/:id/status', requireAdmin, validate(UpdateStatusDto), async (req, res) => {
-  await db.update(users).set({ isActive: req.body.isActive }).where(eq(users.id, req.params.id));
+academicsRouter.delete('/education-stages/:id', async (req, res) => {
+  const [row] = await db.delete(educationStage).where(eq(educationStage.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
   res.json({ ok: true });
 });
 
-identityRouter.post('/admin/users/:id/lock', requireAdmin, async (req, res) => {
-  const until = new Date(Date.now() + 15*60*1000);
-  await db.update(users).set({ lockedUntil: until }).where(eq(users.id, req.params.id));
-  res.json({ lockedUntil: until.toISOString() });
+/* ---- Grade Levels ---- */
+academicsRouter.post('/grade-levels', validate(CreateGradeLevelDto), async (req, res) => {
+  const [row] = await db.insert(gradeLevel).values(req.body).returning();
+  res.status(201).json(row);
 });
-
-identityRouter.post('/admin/users/:id/unlock', requireAdmin, async (req, res) => {
-  await db.update(users).set({ lockedUntil: null, failedLogins: 0 }).where(eq(users.id, req.params.id));
+academicsRouter.get('/grade-levels', async (req, res) => {
+  const { stageId } = req.query as { stageId?: string };
+  const data = await db.select().from(gradeLevel)
+    .where(stageId ? eq(gradeLevel.stageId, stageId) : undefined)
+    .orderBy(gradeLevel.orderIndex);
+  res.json(data);
+});
+academicsRouter.patch('/grade-levels/:id', validate(UpdateGradeLevelDto), async (req, res) => {
+  const [row] = await db.update(gradeLevel).set(req.body).where(eq(gradeLevel.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json(row);
+});
+academicsRouter.delete('/grade-levels/:id', async (req, res) => {
+  const [row] = await db.delete(gradeLevel).where(eq(gradeLevel.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
   res.json({ ok: true });
 });
 
-identityRouter.post('/admin/users/:id/reset-secret', requireAdmin, async (req, res) => {
-  const [u] = await db.select().from(users).where(eq(users.id, req.params.id));
-  if(!u) return res.status(404).json({ error: { message: 'User not found' } });
-  if(u.authMethod !== 'LOGIN_ID') return res.status(400).json({ error: { message: 'Only non-admin users have secrets' } });
-  const newSecret = randomSecret(12);
-  const passwordHash = await argon2Hash(newSecret);
-  await db.update(users).set({ passwordHash, secretUpdatedAt: new Date() }).where(eq(users.id, u.id));
-  // TODO: revoke existing sessions for this user
-  res.json({ newSecret }); // show once
+/* ---- Academic Years ---- */
+academicsRouter.post('/academic-years', validate(CreateAcademicYearDto), async (req, res) => {
+  // Optional: if setting isActive=true, set others false
+  if (req.body.isActive === true) {
+    await db.update(academicYear).set({ isActive: false }).where(eq(academicYear.isActive, true));
+  }
+  const [row] = await db.insert(academicYear).values(req.body).returning();
+  res.status(201).json(row);
 });
-
-identityRouter.post('/admin/users/:id/rotate-login-id', requireAdmin, async (req, res) => {
-  const [u] = await db.select().from(users).where(eq(users.id, req.params.id));
-  if(!u) return res.status(404).json({ error: { message: 'User not found' } });
-  if(u.authMethod !== 'LOGIN_ID') return res.status(400).json({ error: { message: 'Only non-admin users have login_id' } });
-  const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  const any = roles.find(r => r.role !== 'ADMIN');
-  const newLoginId = makeLoginId((any?.role as any) ?? 'STUDENT');
-  await db.update(users).set({ loginId: newLoginId }).where(eq(users.id, u.id));
-  res.json({ newLoginId });
+academicsRouter.get('/academic-years', async (_req, res) => {
+  const data = await db.select().from(academicYear).orderBy(academicYear.startsOn);
+  res.json(data);
 });
-
-/* ---------- ADMIN: PROFILES (address etc.) ---------- */
-identityRouter.patch('/admin/profiles/:id', requireAdmin, validate(UpdateProfileDto), async (req, res) => {
-  const { firstName, lastName, phone, dob, photoUrl, address, city, region, country } = req.body;
-  await db.update(profiles).set({
-    ...(firstName !== undefined && { firstName }),
-    ...(lastName  !== undefined && { lastName }),
-    ...(phone     !== undefined && { phone }),
-    ...(dob       !== undefined && { dob }),
-    ...(photoUrl  !== undefined && { photoUrl }),
-    ...(address   !== undefined && { address }),
-    ...(city      !== undefined && { city }),
-    ...(region    !== undefined && { region }),
-    ...(country   !== undefined && { country }),
-  }).where(eq(profiles.id, req.params.id));
+academicsRouter.patch('/academic-years/:id', validate(UpdateAcademicYearDto), async (req, res) => {
+  if (req.body.isActive === true) {
+    await db.update(academicYear).set({ isActive: false }).where(and(eq(academicYear.isActive, true), eq(academicYear.id, req.params.id) === false as any));
+  }
+  const [row] = await db.update(academicYear).set(req.body).where(eq(academicYear.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json(row);
+});
+academicsRouter.delete('/academic-years/:id', async (req, res) => {
+  const [row] = await db.delete(academicYear).where(eq(academicYear.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
   res.json({ ok: true });
 });
-8) Error Shape & Security
-Error JSON
 
-json
-Copier le code
-{ "error": { "message": "string", "details": { } } }
-Statuses
+/* ---- Terms ---- */
+academicsRouter.post('/terms', validate(CreateTermDto), async (req, res) => {
+  const [row] = await db.insert(term).values(req.body).returning();
+  res.status(201).json(row);
+});
+academicsRouter.get('/terms', async (req, res) => {
+  const { academicYearId } = req.query as { academicYearId?: string };
+  const data = await db.select().from(term)
+    .where(academicYearId ? eq(term.academicYearId, academicYearId) : undefined)
+    .orderBy(term.orderIndex);
+  res.json(data);
+});
+academicsRouter.patch('/terms/:id', validate(UpdateTermDto), async (req, res) => {
+  const [row] = await db.update(term).set(req.body).where(eq(term.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json(row);
+});
+academicsRouter.delete('/terms/:id', async (req, res) => {
+  const [row] = await db.delete(term).where(eq(term.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json({ ok: true });
+});
 
-400 validation, 401 unauthenticated, 403 admin only, 404 not found, 423 locked, 429 rate limit, 500 server
+/* ---- Subjects ---- */
+academicsRouter.post('/subjects', validate(CreateSubjectDto), async (req, res) => {
+  const [row] = await db.insert(subject).values(req.body).returning();
+  res.status(201).json(row);
+});
+academicsRouter.get('/subjects', async (req, res) => {
+  const { stageId, active } = req.query as { stageId?: string; active?: string };
+  const where = [
+    stageId ? eq(subject.stageId, stageId) : undefined,
+    active === undefined ? undefined : eq(subject.isActive, active === 'true')
+  ].filter(Boolean) as any;
+  const data = await db.select().from(subject).where(where.length ? and(...where) : undefined).orderBy(subject.code);
+  res.json(data);
+});
+academicsRouter.patch('/subjects/:id', validate(UpdateSubjectDto), async (req, res) => {
+  const [row] = await db.update(subject).set(req.body).where(eq(subject.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json(row);
+});
+academicsRouter.delete('/subjects/:id', async (req, res) => {
+  const [row] = await db.delete(subject).where(eq(subject.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json({ ok: true });
+});
 
-Security checklist
+/* ---- Class Sections ---- */
+academicsRouter.post('/class-sections', validate(CreateClassSectionDto), async (req, res) => {
+  const [row] = await db.insert(classSection).values(req.body).returning();
+  res.status(201).json(row);
+});
+academicsRouter.get('/class-sections', async (req, res) => {
+  const { academicYearId, gradeLevelId } = req.query as { academicYearId?: string; gradeLevelId?: string };
+  const where = [
+    academicYearId ? eq(classSection.academicYearId, academicYearId) : undefined,
+    gradeLevelId ? eq(classSection.gradeLevelId, gradeLevelId) : undefined,
+  ].filter(Boolean) as any;
+  const data = await db.select().from(classSection).where(where.length ? and(...where) : undefined)
+    .orderBy(classSection.name);
+  res.json(data);
+});
+academicsRouter.patch('/class-sections/:id', validate(UpdateClassSectionDto), async (req, res) => {
+  const [row] = await db.update(classSection).set(req.body).where(eq(classSection.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json(row);
+});
+academicsRouter.delete('/class-sections/:id', async (req, res) => {
+  const [row] = await db.delete(classSection).where(eq(classSection.id, req.params.id)).returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json({ ok: true });
+});
 
-Hash with Argon2
-
-Rate-limit /auth/*; after N failures (e.g., 5) set locked_until = now()+15m
-
-HttpOnly cookies; enable secure in production (HTTPS)
-
-Never log/persist plaintext secrets; show them once on create/reset
-
-Audit admin actions later (audit_log)
-
-9) Seed First Admin (script snippet)
-ts
-Copier le code
-// scripts/seed_admin.ts
-import 'dotenv/config';
-import { db } from '../src/db/client';
-import { users, userRoles, profiles } from '../src/db/schema/identity';
-import { hash as argon2Hash } from '@node-rs/argon2';
-
-const email = process.env.SEED_ADMIN_EMAIL ?? 'admin@example.com';
-const password = process.env.SEED_ADMIN_PASSWORD ?? 'AdminPass123';
-
-const run = async () => {
-  const passwordHash = await argon2Hash(password);
-  const [u] = await db.insert(users).values({
-    authMethod: 'EMAIL', email, passwordHash, isActive: true
-  }).onConflictDoNothing().returning();
-
-  if (!u) { console.log('Admin exists.'); return; }
-
-  await db.insert(userRoles).values({ userId: u.id, role: 'ADMIN' });
-  await db.insert(profiles).values({ userId: u.id, firstName: 'System', lastName: 'Admin' });
-  console.log(`Seeded admin: ${email} / ${password}`);
-};
-
-run().catch(e => { console.error(e); process.exit(1); });
-Run:
-
+/* ---- Section Subjects ---- */
+academicsRouter.post('/class-sections/:id/subjects', validate(SetSectionSubjectsDto), async (req, res) => {
+  const sectionId = req.params.id;
+  // Replace full set atomically
+  await db.transaction(async tx => {
+    await tx.delete(classSectionSubject).where(eq(classSectionSubject.classSectionId, sectionId));
+    const ids = req.body.subjectIds;
+    if (ids.length) {
+      await tx.insert(classSectionSubject).values(ids.map(sid => ({
+        classSectionId: sectionId, subjectId: sid
+      })));
+    }
+  });
+  res.json({ ok: true });
+});
+academicsRouter.get('/class-sections/:id/subjects', async (req, res) => {
+  const sectionId = req.params.id;
+  const rows = await db.select().from(classSectionSubject).where(eq(classSectionSubject.classSectionId, sectionId));
+  res.json(rows);
+});
+academicsRouter.delete('/class-sections/:id/subjects/:subjectId', async (req, res) => {
+  const sectionId = req.params.id;
+  const subjectId = req.params.subjectId;
+  const [row] = await db.delete(classSectionSubject)
+    .where(and(eq(classSectionSubject.classSectionId, sectionId), eq(classSectionSubject.subjectId, subjectId)))
+    .returning();
+  if (!row) return res.status(404).json({ error: { message: 'Not found' } });
+  res.json({ ok: true });
+});
+6) Manual Tests (cURL)
 bash
 Copier le code
-SEED_ADMIN_EMAIL=admin@example.com SEED_ADMIN_PASSWORD=AdminPass123 \
-bunx tsx scripts/seed_admin.ts
-10) Manual Tests (cURL)
-bash
-Copier le code
-# Admin login (email)
-curl -i -c cookies.txt -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"AdminPass123"}' \
-  http://localhost:4000/api/auth/login-email
+# (Assumes you’re logged in as ADMIN and have cookies.txt from Module 1)
 
-# Create a student (returns loginId + secret ONCE)
-curl -i -b cookies.txt -H "Content-Type: application/json" \
-  -d '{"role":"STUDENT","firstName":"Amina","lastName":"Mahamat"}' \
-  http://localhost:4000/api/admin/users
+# Stages
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"code":"PRIMAIRE","name":"Primaire","orderIndex":1}' \
+  http://localhost:4000/api/academics/education-stages
 
-# Student login
-curl -i -c s.txt -H "Content-Type: application/json" \
-  -d '{"loginId":"S123456","secret":"k7Q8mZ2xV9"}' \
-  http://localhost:4000/api/auth/login-id
+# Grade levels (example)
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"stageId":"<STAGE_ID>","code":"CP1","name":"CP1"}' \
+  http://localhost:4000/api/academics/grade-levels
 
-# Who am I?
-curl -i -b s.txt http://localhost:4000/api/me
+# Academic year
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"code":"2025-2026","startsOn":"2025-09-01","endsOn":"2026-06-30"}' \
+  http://localhost:4000/api/academics/academic-years
 
-# Reset secret
-curl -i -b cookies.txt -X POST http://localhost:4000/api/admin/users/<USER_ID>/reset-secret
+# Term
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"academicYearId":"<YEAR_ID>","name":"Trimestre 1","startsOn":"2025-09-01","endsOn":"2025-11-30","orderIndex":1}' \
+  http://localhost:4000/api/academics/terms
 
-# Rotate login_id
-curl -i -b cookies.txt -X POST http://localhost:4000/api/admin/users/<USER_ID>/rotate-login-id
+# Subject
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"code":"MATH","name":"Mathématiques"}' \
+  http://localhost:4000/api/academics/subjects
 
-# Activate / Deactivate
-curl -i -b cookies.txt -X PATCH -H "Content-Type: application/json" \
-  -d '{"isActive":false}' http://localhost:4000/api/admin/users/<USER_ID>/status
+# Class section
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"academicYearId":"<YEAR_ID>","gradeLevelId":"<LEVEL_ID>","name":"A","capacity":45}' \
+  http://localhost:4000/api/academics/class-sections
 
-# Update profile address
-curl -i -b cookies.txt -X PATCH -H "Content-Type: application/json" \
-  -d '{"address":"Quartier Klemat, Villa 12", "city":"N’Djamena","region":"Chari-Baguirmi","country":"TD"}' \
-  http://localhost:4000/api/admin/profiles/<PROFILE_ID>
-11) OpenAPI (compact)
-yaml
-Copier le code
-openapi: 3.0.3
-info: { title: School API — Module 1 (Identity), version: 1.0.0 }
-servers: [ { url: http://localhost:4000/api } ]
-paths:
-  /auth/login-email:
-    post:
-      requestBody:
-        required: true
-        content: { application/json: { schema:
-          { type: object, properties: { email: {type: string, format: email}, password: {type: string, minLength: 8} }, required: [email, password] } } }
-      responses: { '200': { description: ok }, '401': { description: invalid }, '403': { description: admin only } }
-  /auth/login-id:
-    post:
-      requestBody:
-        required: true
-        content: { application/json: { schema:
-          { type: object, properties: { loginId: {type: string}, secret: {type: string} }, required: [loginId, secret] } } }
-      responses: { '200': { description: ok }, '401': { description: invalid } }
-  /auth/logout:
-    post: { responses: { '200': { description: ok }, '401': { description: not signed in } } }
-  /me:
-    get: { responses: { '200': { description: ok }, '401': { description: not signed in } } }
-  /admin/users:
-    get:  { responses: { '200': { description: list }, '403': { description: admin only } } }
-    post:
-      requestBody:
-        required: true
-        content: { application/json: { schema:
-          { type: object, properties:
-            { role: { enum: [ADMIN,STAFF,TEACHER,STUDENT,GUARDIAN] },
-              email: { type: string, format: email }, password: { type: string, minLength: 8 },
-              firstName: { type: string }, lastName: { type: string }, phone: { type: string } },
-            required: [role, firstName, lastName] } } }
-      responses: { '201': { description: created }, '403': { description: admin only } }
-  /admin/users/{id}:
-    get:
-      parameters: [ { in: path, name: id, required: true, schema: { type: string } } ]
-      responses: { '200': { description: ok }, '404': { description: not found }, '403': { description: admin only } }
-  /admin/users/{id}/status:
-    patch:
-      parameters: [ { in: path, name: id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: true
-        content: { application/json: { schema: { type: object, properties: { isActive: { type: boolean } }, required: [isActive] } } }
-      responses: { '200': { description: ok }, '403': { description: admin only } }
-  /admin/users/{id}/lock:
-    post: { parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: ok }, '403': { description: admin only } } }
-  /admin/users/{id}/unlock:
-    post: { parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: ok }, '403': { description: admin only } } }
-  /admin/users/{id}/reset-secret:
-    post: { parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: shows newSecret once }, '403': { description: admin only } } }
-  /admin/users/{id}/rotate-login-id:
-    post: { parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: shows newLoginId }, '403': { description: admin only } } }
-  /admin/profiles/{id}:
-    patch:
-      parameters: [ { in: path, name: id, required: true, schema: { type: string } } ]
-      requestBody:
-        required: true
-        content: { application/json: { schema:
-          { type: object, additionalProperties: true } } }
-      responses: { '200': { description: ok }, '403': { description: admin only } }
-12) Definition of Done
- Drizzle schema & migrations applied
+# Attach subjects to section
+curl -b cookies.txt -H "Content-Type: application/json" -d '{"subjectIds":["<SUBJECT_ID>","<SUBJECT_ID_2>"]}' \
+  http://localhost:4000/api/academics/class-sections/<SECTION_ID>/subjects
 
- Session cookies + RBAC middleware working
+# Get section subjects
+curl -b cookies.txt http://localhost:4000/api/academics/class-sections/<SECTION_ID>/subjects
+7) Acceptance Criteria
+Can define stages and grade levels reflecting the Chad system.
 
- /auth/login-email, /auth/login-id, /auth/logout, /me implemented
+Can create an academic year and its terms with valid date ranges.
 
- Admin user CRUD (create/list/get) + reset secret / rotate login_id / lock & unlock / activate & deactivate
+Can define subjects (optionally tied to a stage).
 
- profiles supports single address, city, region, country ('TD')
+Can create class sections (unique per year/grade/name) and attach/remove subjects.
 
- First admin seeded and able to create users
+All endpoints require ADMIN; return consistent error JSON.
 
- Auth routes rate-limited; consistent error JSON
+Constraints enforced: uniqueness; date order; optional “single active year” behavior.

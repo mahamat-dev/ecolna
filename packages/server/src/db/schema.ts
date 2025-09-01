@@ -9,6 +9,7 @@ import {
 import { sql } from 'drizzle-orm';
 
 export * from './schema/identity';
+export * from './schema/academics';
 
 export const users = pgTable('users', {
    id: serial('id').primaryKey(),

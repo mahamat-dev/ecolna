@@ -10,7 +10,8 @@
       "db:gen": "bunx drizzle-kit generate",
       "db:migrate": "bunx drizzle-kit migrate",
       "db:studio": "bunx drizzle-kit studio",
-      "seed:admin": "bunx tsx scripts/seed_admin.ts"
+      "seed:admin": "bunx tsx scripts/seed_admin.ts",
+      "seed:academics": "bunx tsx scripts/seed_academics.ts"
    },
    "devDependencies": {
       "@types/bun": "latest",
