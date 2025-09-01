@@ -5,6 +5,8 @@ import academicsRouter from '../modules/academics/routes.ts';
 import enrollmentRouter from '../modules/enrollment/routes.ts';
 import teachingRouter from '../modules/teaching/routes.ts';
 import attendanceRouter from '../modules/attendance/routes.ts';
+import { auditRouter } from '../modules/admin-utils/audit.routes';
+import { searchRouter } from '../modules/admin-utils/search.routes';
 
 const router = Router();
 
@@ -14,5 +16,7 @@ router.use('/academics', academicsRouter);
 router.use('/enrollment', enrollmentRouter);
 router.use('/teaching', teachingRouter);
 router.use('/attendance', attendanceRouter);
+router.use('/admin/audit', auditRouter);
+router.use('/admin/search', searchRouter);
 
 export default router;

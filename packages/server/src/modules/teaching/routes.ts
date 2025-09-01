@@ -7,6 +7,7 @@ import { term, academicYear, classSection, subject } from '../../db/schema/acade
 import { teachingAssignment } from '../../db/schema/teaching';
 import { CreateAssignmentDto, UpdateAssignmentDto } from './dto';
 import { and, eq, isNull } from 'drizzle-orm';
+import { writeAudit, actorFromReq } from '../../utils/audit';
 
 const router = Router();
 
@@ -76,6 +77,25 @@ router.post('/assignments', validate(CreateAssignmentDto), async (req, res) => {
         teacherProfileId, classSectionId, subjectId, academicYearId,
         termId, isLead: !!isLead, isHomeroom: !!isHomeroom, hoursPerWeek: hoursPerWeek ?? null, notes: notes ?? null
       }).returning();
+
+      if (!row) {
+        throw Object.assign(new Error('Failed to create assignment'), { status: 500 });
+      }
+
+      // Audit: assignment created
+      const actor = actorFromReq(req);
+      await writeAudit(tx, {
+        action: 'TEACHING_ASSIGNMENT_CREATE',
+        entityType: 'teaching_assignment',
+        entityId: row.id,
+        summary: `Assigned teacher ${teacherProfileId} to section ${classSectionId} subject ${subjectId} (year ${academicYearId}${termId ? ` term ${termId}` : ''}) lead=${!!isLead} homeroom=${!!isHomeroom}`,
+        meta: { payload: req.body, created: row },
+        actorUserId: actor.userId ?? null,
+        actorRoles: actor.roles ?? null,
+        ip: actor.ip ?? null,
+        at: new Date(),
+      });
+
       return [row];
     });
 
@@ -108,6 +128,21 @@ router.patch('/assignments/:id', validate(UpdateAssignmentDto), async (req, res)
   });
 
   const [updated] = await db.select().from(teachingAssignment).where(eq(teachingAssignment.id, id));
+
+  // Audit: assignment updated
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'TEACHING_ASSIGNMENT_UPDATE',
+    entityType: 'teaching_assignment',
+    entityId: id,
+    summary: `Updated assignment ${id}`,
+    meta: { before: existing, after: updated, changes: req.body },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
+
   res.json(updated);
 });
 
@@ -160,6 +195,25 @@ router.post('/class-sections/:id/homeroom', async (req, res) => {
       teacherProfileId, classSectionId: sectionId, subjectId: finalSubjectId,
       academicYearId, termId: null, isLead: true, isHomeroom: true
     }).returning();
+
+    if (!row) {
+      return res.status(500).json({ error: { message: 'Failed to set homeroom' } });
+    }
+
+    // Audit: set homeroom
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      action: 'TEACHING_SET_HOMEROOM',
+      entityType: 'teaching_assignment',
+      entityId: row.id,
+      summary: `Set homeroom for section ${sectionId} (year ${academicYearId}) teacher ${teacherProfileId}`,
+      meta: { assignment: row },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
+
     res.status(201).json(row);
   } catch (e: any) {
     res.status(e.status ?? 400).json({ error: { message: e.message } });
@@ -220,7 +274,7 @@ teacherRouter.get('/my/assignments', async (req, res) => {
     
     res.json(assignments);
   } catch (e: any) {
-    res.status(500).json({ error: { message: e.message } });
+    res.status(400).json({ error: { message: e.message } });
   }
 });
 

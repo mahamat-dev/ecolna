@@ -1,891 +1,563 @@
-# Module 4 — Teaching Assignments (API-only, **Express 5 + Drizzle**)
+# CLAUDE.module-6-admin-utils.md  
+**Module 6 — Admin Utilities: Audit Log & Global Search**  
+_Server: Express 5 · TypeScript · Drizzle ORM · Postgres · Bun_
 
-**Goal:** map **teachers ↔ class sections ↔ subjects** (optionally by term) for a given academic year.  
-This powers permissions for **attendance**, **marks/exams**, and teacher dashboards.
-
-> **Auth:** Admin-only for managing assignments. Read-only endpoints for **TEACHER** to see their own assignments.
-
----
-
-## 0) Outcomes
-
-- New tables:
-  - `teaching_assignment` — core mapping of teacher ↔ class_section ↔ subject (optionally term).
-- Endpoints:
-  - Create/update/delete assignments (Admin)
-  - List assignments by teacher, section, subject, term (Admin)
-  - “My assignments” for teacher (Teacher)
-  - Set/get homeroom (class teacher) per section
-- Rules:
-  - Each record belongs to an **academic_year**
-  - Optional **term** constraint
-  - Support **lead vs assistant** teacher on a subject
-  - At most **one homeroom** teacher per section/year (enforced in service)
+> Adds cross-module **Audit Logging** and **Global Search** to support the Admin Dashboard and operations.  
+> This file is **complete**: schema, migrations, DTOs, services, routes, RBAC, i18n, pagination, tests, and DoD.
 
 ---
 
-## 1) Database Design
+## 0) Scope & Outcomes
 
-### References (existing)
-- `profiles` (Module 1)
-- `user_roles` (role includes `TEACHER`)
-- `academic_year`, `term`, `subject`, `class_section` (Module 2)
+### What you get
+- **Audit log** table + service to record who did what, when, and to which entity.
+- **Admin audit API** to filter/paginate logs.
+- **Global search API** to find **users, students, teachers, sections** (optionally guardians) with one query.
+- **Indices** & optional **Full-Text Search (FTS)** for performance.
+- **RBAC**: ADMIN-only for audit; search can be ADMIN or STAFF.
+- **i18n** compliant error messages (uses your existing `tReq`/locale middleware if present).
 
-### New table
-
-#### `teaching_assignment`
-Represents that one **teacher** teaches one **subject** to one **class_section** in an **academic_year** (and optionally **term**).
-
-| column              | type        | notes |
-|---------------------|-------------|------|
-| `id`                | uuid        | **PK**, `default gen_random_uuid()` |
-| `teacher_profile_id`| uuid        | **FK → profiles(id)** (teacher), `ON DELETE RESTRICT` |
-| `class_section_id`  | uuid        | **FK → class_section(id)**, `ON DELETE CASCADE` |
-| `subject_id`        | uuid        | **FK → subject(id)**, `ON DELETE RESTRICT` |
-| `academic_year_id`  | uuid        | **FK → academic_year(id)**, `ON DELETE RESTRICT` |
-| `term_id`           | uuid        | nullable **FK → term(id)** (when term-specific) |
-| `is_lead`           | boolean     | default `true` (false = assistant/co-teacher) |
-| `is_homeroom`       | boolean     | default `false` (class teacher) |
-| `hours_per_week`    | integer     | optional estimate |
-| `notes`             | text        | optional |
-
-**Uniqueness (soft constraints):**
-- Allow multiple teachers per `(section,subject,term?)` (co-teaching), but only one `is_lead=true`.
-- Allow at most one `is_homeroom=true` per `(section, academic_year)`.
-
-> These are easier in service logic than rigid DB constraints (schools differ). We’ll enforce via transactions.
+### Dependencies
+- Module 1 (users, roles, profiles)
+- Module 2 (academics: class_section, grade_level, academic_year)
+- Module 3 (enrollment) for student existence checks (optional in search)
+- Module 4 (teaching_assignment) for teacher checks (optional in search)
 
 ---
 
-### Drizzle schema (drop-in)
+## 1) Database Design (Drizzle + Postgres)
 
+### 1.1 Table: `audit_log`
+Captures atomic events (create/update/delete/state change/important read).
+
+| column            | type         | notes |
+|-------------------|--------------|------|
+| `id`              | uuid PK      | `gen_random_uuid()` |
+| `at`              | timestamptz  | default `now()` |
+| `actor_user_id`   | uuid         | FK → `users(id)`, `ON DELETE SET NULL` |
+| `actor_roles`     | text[]       | snapshot of roles at time of action |
+| `ip`              | text         | client IP (store as text for portability) |
+| `action`          | text         | e.g., `USER_CREATE`, `ENROLL_TRANSFER`, `ATTENDANCE_FINALIZE` |
+| `entity_type`     | text         | e.g., `USER`, `PROFILE`, `CLASS_SECTION`, `ENROLLMENT`, `ATTENDANCE_SESSION` |
+| `entity_id`       | uuid         | target entity id (nullable for global events) |
+| `summary`         | text         | human-readable one-liner |
+| `meta`            | jsonb        | optional structured context (before/after, involved ids, etc.) |
+
+**Drizzle schema** — `packages/server/src/db/schema/audit.ts`
 ```ts
-// src/db/schema/teaching.ts
-import { pgTable, uuid, boolean, integer, text } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, timestamp, text, jsonb } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
-import { profiles } from './identity';
-import { academicYear, term, subject, classSection } from './academics';
+import { users } from './identity';
 
-export const teachingAssignment = pgTable('teaching_assignment', {
+export const auditLog = pgTable('audit_log', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-
-  teacherProfileId: uuid('teacher_profile_id').notNull()
-    .references(() => profiles.id, { onDelete: 'restrict' }),
-
-  classSectionId: uuid('class_section_id').notNull()
-    .references(() => classSection.id, { onDelete: 'cascade' }),
-
-  subjectId: uuid('subject_id').notNull()
-    .references(() => subject.id, { onDelete: 'restrict' }),
-
-  academicYearId: uuid('academic_year_id').notNull()
-    .references(() => academicYear.id, { onDelete: 'restrict' }),
-
-  termId: uuid('term_id').references(() => term.id, { onDelete: 'set null' }),
-
-  isLead: boolean('is_lead').notNull().default(true),
-  isHomeroom: boolean('is_homeroom').notNull().default(false),
-
-  hoursPerWeek: integer('hours_per_week'),
-  notes: text('notes'),
+  at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+  actorUserId: uuid('actor_user_id').references(() => users.id, { onDelete: 'set null' }),
+  actorRoles: text('actor_roles').array(),
+  ip: text('ip'),
+  action: text('action').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: uuid('entity_id'),
+  summary: text('summary').notNull(),
+  meta: jsonb('meta'),
 });
-(Optional indices) add a migration with:
+SQL migration — drizzle/XXXXXXXX_create_audit.sql
 
 sql
-Copier le code
-CREATE INDEX IF NOT EXISTS idx_ta_teacher ON teaching_assignment(teacher_profile_id);
-CREATE INDEX IF NOT EXISTS idx_ta_section ON teaching_assignment(class_section_id);
-CREATE INDEX IF NOT EXISTS idx_ta_year ON teaching_assignment(academic_year_id);
-CREATE INDEX IF NOT EXISTS idx_ta_term ON teaching_assignment(term_id);
-2) Business Rules
-Teacher role check: teacher_profile_id must belong to a users row that has role = TEACHER. (Service verifies via join profiles.user_id -> user_roles.)
 
-Year alignment: term_id, if provided, must belong to the same academic_year_id. (Service validates.)
+CREATE TABLE IF NOT EXISTS audit_log (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  at timestamptz NOT NULL DEFAULT now(),
+  actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  actor_roles text[],
+  ip text,
+  action text NOT NULL,
+  entity_type text NOT NULL,
+  entity_id uuid,
+  summary text NOT NULL,
+  meta jsonb
+);
 
-Lead teacher uniqueness: For (class_section, subject, term?), at most one record with is_lead=true. (Service enforces by demoting any existing leads to assistant or rejecting.)
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log (at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log (action);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log (actor_user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_meta_gin ON audit_log USING GIN (meta);
+1.2 (Optional) Full-Text Search helpers
+Add generated tsvector for better search across summary & meta.
 
-Homeroom uniqueness: For (class_section, academic_year), at most one record with is_homeroom=true. (Service clears previous homeroom in a transaction.)
+sql
 
-Cascade delete: Removing a class_section deletes its assignments.
+ALTER TABLE audit_log
+  ADD COLUMN IF NOT EXISTS tsv tsvector
+  GENERATED ALWAYS AS (
+    setweight(to_tsvector('simple', coalesce(summary,'')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(meta::text,'')), 'D')
+  ) STORED;
 
-3) DTOs (Zod)
+CREATE INDEX IF NOT EXISTS idx_audit_tsv ON audit_log USING GIN (tsv);
+2) DTOs & Validation (Zod)
+packages/server/src/modules/admin-utils/dto.ts
+
 ts
-Copier le code
-// src/modules/teaching/dto.ts
+
 import { z } from 'zod';
 
-export const CreateAssignmentDto = z.object({
-  teacherProfileId: z.string().uuid(),
-  classSectionId: z.string().uuid(),
-  subjectId: z.string().uuid(),
-  academicYearId: z.string().uuid(),
-  termId: z.string().uuid().nullable().optional(),
-  isLead: z.boolean().optional(),
-  isHomeroom: z.boolean().optional(),
-  hoursPerWeek: z.number().int().min(1).max(40).optional(),
-  notes: z.string().max(300).optional(),
-});
-
-export const UpdateAssignmentDto = z.object({
-  isLead: z.boolean().optional(),
-  isHomeroom: z.boolean().optional(),
-  hoursPerWeek: z.number().int().min(1).max(40).nullable().optional(),
-  notes: z.string().max(300).nullable().optional(),
-  termId: z.string().uuid().nullable().optional(),
-});
-
-export const ListQueryDto = z.object({
-  teacherProfileId: z.string().uuid().optional(),
-  classSectionId: z.string().uuid().optional(),
-  subjectId: z.string().uuid().optional(),
-  academicYearId: z.string().uuid().optional(),
-  termId: z.string().uuid().optional(),
-});
-4) Endpoints (spec)
-Base path: /api/teaching/*
-
-Admin (manage)
-POST /assignments (CreateAssignmentDto) — create a teaching assignment (enforces rules #1–#4).
-
-PATCH /assignments/:id (UpdateAssignmentDto) — update flags/term/hours/notes (re-check rules).
-
-DELETE /assignments/:id — remove an assignment.
-
-GET /assignments (ListQueryDto via query string) — list with filters.
-
-Convenience
-POST /class-sections/:id/homeroom — set homeroom teacher (body: { teacherProfileId, academicYearId }) → clears previous.
-
-GET /class-sections/:id/homeroom?yearId= — get homeroom teacher for year.
-
-Teacher self-view
-GET /my/assignments — requires TEACHER role; returns only the caller’s assignments.
-
-Error shape: { "error": { "message": "string", "details"?: any } }
-
-5) Routes (Express 5 — outline)
-ts
-Copier le code
-// src/modules/teaching/routes.ts
-import { Router } from 'express';
-import { db } from '../../db/client';
-import { validate } from '../../middlewares/validate';
-import { requireAdmin } from '../../middlewares/rbac';
-import { users, userRoles, profiles } from '../../db/schema/identity';
-import { term, academicYear, classSection, subject } from '../../db/schema/academics';
-import { teachingAssignment } from '../../db/schema/teaching';
-import { CreateAssignmentDto, UpdateAssignmentDto } from './dto';
-import { and, eq } from 'drizzle-orm';
-
-export const teachingRouter = Router();
-
-/* ----- helpers ----- */
-async function ensureTeacherProfile(profileId: string) {
-  // profile -> user -> has TEACHER role
-  const row = await db.query.profiles.findFirst({
-    where: (p, { eq }) => eq(p.id, profileId),
-    with: {
-      user: {
-        with: {
-          roles: true
-        }
-      }
-    } as any
-  } as any); // adjust if you use relations()
-  const hasTeacher = row?.user
-    ? (await db.select().from(userRoles).where(and(eq(userRoles.userId, row.userId!), eq(userRoles.role, 'TEACHER')))).length > 0
-    : false;
-  if (!hasTeacher) throw Object.assign(new Error('Profile is not a TEACHER'), { status: 400 });
-}
-
-async function ensureTermInYear(termId?: string | null, yearId?: string) {
-  if (!termId) return;
-  const [t] = await db.select().from(term).where(eq(term.id, termId));
-  if (!t || t.academicYearId !== yearId) {
-    throw Object.assign(new Error('termId must belong to academicYearId'), { status: 400 });
-  }
-}
-
-async function enforceLeadUniqueness(sectionId: string, subjectId: string, termId: string | null, makeLead: boolean, assignmentIdToSkip?: string) {
-  if (!makeLead) return;
-  const rows = await db.select().from(teachingAssignment).where(and(
-    eq(teachingAssignment.classSectionId, sectionId),
-    eq(teachingAssignment.subjectId, subjectId),
-    termId ? eq(teachingAssignment.termId, termId) : eq(teachingAssignment.termId, null)
-  ));
-  // Demote others (except the one we’re creating/updating)
-  for (const r of rows) {
-    if (assignmentIdToSkip && r.id === assignmentIdToSkip) continue;
-    if (r.isLead) {
-      await db.update(teachingAssignment).set({ isLead: false }).where(eq(teachingAssignment.id, r.id));
-    }
-  }
-}
-
-async function enforceHomeroomUniqueness(sectionId: string, yearId: string, makeHomeroom: boolean, assignmentIdToSkip?: string) {
-  if (!makeHomeroom) return;
-  const rows = await db.select().from(teachingAssignment).where(and(
-    eq(teachingAssignment.classSectionId, sectionId),
-    eq(teachingAssignment.academicYearId, yearId)
-  ));
-  for (const r of rows) {
-    if (assignmentIdToSkip && r.id === assignmentIdToSkip) continue;
-    if (r.isHomeroom) {
-      await db.update(teachingAssignment).set({ isHomeroom: false }).where(eq(teachingAssignment.id, r.id));
-    }
-  }
-}
-
-/* ----- Admin: create assignment ----- */
-teachingRouter.post('/assignments', requireAdmin, validate(CreateAssignmentDto), async (req, res) => {
-  const { teacherProfileId, classSectionId, subjectId, academicYearId, termId=null, isLead=true, isHomeroom=false, hoursPerWeek, notes } = req.body;
-
-  await ensureTeacherProfile(teacherProfileId);
-  await ensureTermInYear(termId, academicYearId);
-
-  const [row] = await db.transaction(async tx => {
-    await enforceLeadUniqueness(classSectionId, subjectId, termId, !!isLead);
-    await enforceHomeroomUniqueness(classSectionId, academicYearId, !!isHomeroom);
-
-    const [created] = await tx.insert(teachingAssignment).values({
-      teacherProfileId, classSectionId, subjectId, academicYearId,
-      termId, isLead: !!isLead, isHomeroom: !!isHomeroom, hoursPerWeek: hoursPerWeek ?? null, notes: notes ?? null
-    }).returning();
-
-    return [created];
-  });
-
-  res.status(201).json(row);
-});
-
-/* ----- Admin: update ----- */
-teachingRouter.patch('/assignments/:id', requireAdmin, validate(UpdateAssignmentDto), async (req, res) => {
-  const [existing] = await db.select().from(teachingAssignment).where(eq(teachingAssignment.id, req.params.id));
-  if (!existing) return res.status(404).json({ error: { message: 'Assignment not found' } });
-
-  if (req.body.termId !== undefined) {
-    await ensureTermInYear(req.body.termId ?? null, existing.academicYearId);
-  }
-
-  await db.transaction(async () => {
-    if (req.body.isLead !== undefined) {
-      await enforceLeadUniqueness(existing.classSectionId, existing.subjectId, existing.termId ?? null, !!req.body.isLead, existing.id);
-    }
-    if (req.body.isHomeroom !== undefined) {
-      await enforceHomeroomUniqueness(existing.classSectionId, existing.academicYearId, !!req.body.isHomeroom, existing.id);
-    }
-    await db.update(teachingAssignment).set(req.body).where(eq(teachingAssignment.id, existing.id));
-  });
-
-  const [updated] = await db.select().from(teachingAssignment).where(eq(teachingAssignment.id, req.params.id));
-  res.json(updated);
-});
-
-/* ----- Admin: delete ----- */
-teachingRouter.delete('/assignments/:id', requireAdmin, async (req, res) => {
-  const [row] = await db.delete(teachingAssignment).where(eq(teachingAssignment.id, req.params.id)).returning();
-  if (!row) return res.status(404).json({ error: { message: 'Assignment not found' } });
-  res.json({ ok: true });
-});
-
-/* ----- Admin: list with filters ----- */
-teachingRouter.get('/assignments', requireAdmin, async (req, res) => {
-  const { teacherProfileId, classSectionId, subjectId, academicYearId, termId } = req.query as Record<string, string | undefined>;
-  const where = [];
-  if (teacherProfileId) where.push(eq(teachingAssignment.teacherProfileId, teacherProfileId));
-  if (classSectionId) where.push(eq(teachingAssignment.classSectionId, classSectionId));
-  if (subjectId) where.push(eq(teachingAssignment.subjectId, subjectId));
-  if (academicYearId) where.push(eq(teachingAssignment.academicYearId, academicYearId));
-  if (termId) where.push(eq(teachingAssignment.termId, termId));
-  const rows = await db.select().from(teachingAssignment).where((where as any).length ? (and as any)(...where) : undefined);
-  res.json(rows);
-});
-
-/* ----- Homeroom helpers ----- */
-teachingRouter.post('/class-sections/:id/homeroom', requireAdmin, async (req, res) => {
-  const sectionId = req.params.id;
-  const { teacherProfileId, academicYearId } = req.body as { teacherProfileId: string; academicYearId: string };
-  await ensureTeacherProfile(teacherProfileId);
-  await enforceHomeroomUniqueness(sectionId, academicYearId, true);
-  // prefer to update existing teacher assignment if exists for this section/year; else create a stub without subject
-  const [row] = await db.insert(teachingAssignment).values({
-    teacherProfileId, classSectionId: sectionId, subjectId: (await db.select().from(subject).limit(1))[0]?.id, // or require subject explicitly
-    academicYearId, termId: null, isLead: true, isHomeroom: true
-  }).returning();
-  res.status(201).json(row);
-});
-
-teachingRouter.get('/class-sections/:id/homeroom', requireAdmin, async (req, res) => {
-  const sectionId = req.params.id;
-  const yearId = req.query.yearId as string | undefined;
-  const where = [eq(teachingAssignment.classSectionId, sectionId), eq(teachingAssignment.isHomeroom, true)];
-  if (yearId) where.push(eq(teachingAssignment.academicYearId, yearId));
-  const rows = await db.select().from(teachingAssignment).where((and as any)(...where));
-  res.json(rows);
-});
-(For teacher self-view, add a small router that requires TEACHER and filters by the caller’s profile.)
-
-6) Manual Tests (cURL)
-bash
-Copier le code
-# Create teaching assignment (Admin)
-curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"teacherProfileId":"<TEACHER_PID>","classSectionId":"<SECTION_ID>","subjectId":"<SUBJECT_ID>","academicYearId":"<YEAR_ID>","termId":null,"isLead":true,"hoursPerWeek":4}' \
-  http://localhost:4000/api/teaching/assignments
-
-# Make a co-teacher (assistant)
-curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"teacherProfileId":"<OTHER_TEACHER_PID>","classSectionId":"<SECTION_ID>","subjectId":"<SUBJECT_ID>","academicYearId":"<YEAR_ID>","isLead":false}' \
-  http://localhost:4000/api/teaching/assignments
-
-# Promote assistant to lead (demotes previous lead automatically)
-curl -b cookies.txt -H "Content-Type: application/json" -X PATCH \
-  -d '{"isLead":true}' \
-  http://localhost:4000/api/teaching/assignments/<ASSIGNMENT_ID>
-
-# Set homeroom teacher (clears previous)
-curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"teacherProfileId":"<TEACHER_PID>","academicYearId":"<YEAR_ID>"}' \
-  http://localhost:4000/api/teaching/class-sections/<SECTION_ID>/homeroom
-
-# List by filters
-curl -b cookies.txt "http://localhost:4000/api/teaching/assignments?teacherProfileId=<TEACHER_PID>&academicYearId=<YEAR_ID>"
-7) Acceptance Criteria
-Admin can assign one or more teachers to a section’s subject, with optional term scoping.
-
-Service verifies the teacher profile actually has the TEACHER role.
-
-Setting is_lead=true on an assignment ensures there is only one lead per (section, subject, term?).
-
-Setting is_homeroom=true ensures only one homeroom per (section, academic_year).
-
-Teachers can fetch only their own assignments via a dedicated endpoint (if enabled).
-
-Data aligns across modules: term (if provided) belongs to the academic_year.
-
-8) Notes & Extensions
-Timetabling/Periods are out of scope here; add a separate module if you need day/period schedules.
-
-Consider an audit_log for changes: who assigned whom, when.
-
-If you want stricter DB guarantees, add partial unique indexes:
-
-One lead per section/subject/term:
-
-sql
-Copier le code
-CREATE UNIQUE INDEX IF NOT EXISTS uq_lead_per_slot
-ON teaching_assignment(class_section_id, subject_id, COALESCE(term_id, '00000000-0000-0000-0000-000000000000')::uuid)
-WHERE is_lead = true;
-One homeroom per section/year:
-
-sql
-Copier le code
-CREATE UNIQUE INDEX IF NOT EXISTS uq_homeroom_per_section_year
-ON teaching_assignment(class_section_id, academic_year_id)
-WHERE is_homeroom = true;
-If your school sets department heads, add department and relate subjects/staff accordingly.
-
-
-
-# Module 5 — Attendance (API-only, **Express 5 + Drizzle**)
-
-**Goal:** record attendance for students, either **daily (homeroom)** or **per-subject lesson**.  
-**Permissions:**  
-- **ADMIN/STAFF** can manage any attendance.  
-- **TEACHER** can manage attendance **only** for class sections (and subjects) they’re assigned to in Module 4.
-
----
-
-## 0) Outcomes
-
-- New tables:
-  - `attendance_session` — one taking event (section + date [+ subject/term]) created by a teacher/staff/admin
-  - `attendance_record` — one row per student with a status and optional note
-- Endpoints:
-  - Create/list/finalize sessions
-  - Bulk mark statuses for a session
-  - Roster with attendance for a day
-  - Student & section attendance history and simple aggregates
-- Rules:
-  - **Uniqueness:** Only **one** session per `(class_section, taken_on, subject?)` within an academic year.
-  - Students must be **actively enrolled** (Module 3) in the section/year on the date.
-  - When a session is **finalized**, only ADMIN can modify it.
-
----
-
-## 1) Data Model (Drizzle / Postgres)
-
-### Enums
-- `attendance_status`: `PRESENT | ABSENT | LATE | EXCUSED`
-
-### Tables
-
-#### `attendance_session`
-A single attendance-taking event for a **class_section** on a specific **date**, optionally tied to a **subject** and **term**.
-
-| column               | type        | notes |
-|----------------------|-------------|------|
-| `id`                 | uuid        | **PK**, `default gen_random_uuid()` |
-| `class_section_id`   | uuid        | **FK → class_section(id)** `ON DELETE CASCADE` |
-| `academic_year_id`   | uuid        | **FK → academic_year(id)** `ON DELETE RESTRICT` |
-| `term_id`            | uuid        | nullable **FK → term(id)** (`SET NULL`) |
-| `subject_id`         | uuid        | nullable **FK → subject(id)** (`RESTRICT`) — null = daily/homeroom |
-| `taken_on`           | date        | **NOT NULL** — the calendar day |
-| `taken_by_profile_id`| uuid        | **FK → profiles(id)** — who initiated |
-| `started_at`         | timestamptz | default `now()` |
-| `finalized_at`       | timestamptz | nullable — set when locked |
-| `note`               | text        | optional |
-
-**Uniqueness:** `(class_section_id, taken_on, COALESCE(subject_id, '00000000-0000-0000-0000-000000000000'))`
-
-#### `attendance_record`
-One row per student for a session.
-
-| column               | type        | notes |
-|----------------------|-------------|------|
-| `id`                 | uuid        | **PK** |
-| `session_id`         | uuid        | **FK → attendance_session(id)** `ON DELETE CASCADE` |
-| `student_profile_id` | uuid        | **FK → profiles(id)** (student) `ON DELETE CASCADE` |
-| `status`             | enum        | `attendance_status`, default `PRESENT` |
-| `note`               | text        | optional |
-| `marked_at`          | timestamptz | default `now()` |
-
-**Uniqueness:** `(session_id, student_profile_id)`
-
----
-
-### Drizzle schema (drop-in)
-
-```ts
-// src/db/schema/attendance.ts
-import { pgTable, uuid, date, timestamp, text, pgEnum } from 'drizzle-orm/pg-core';
-import { sql } from 'drizzle-orm';
-import { profiles } from './identity';
-import { academicYear, classSection, subject, term } from './academics';
-
-export const attendanceStatus = pgEnum('attendance_status', [
-  'PRESENT', 'ABSENT', 'LATE', 'EXCUSED'
-]);
-
-export const attendanceSession = pgTable('attendance_session', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-
-  classSectionId: uuid('class_section_id').notNull()
-    .references(() => classSection.id, { onDelete: 'cascade' }),
-
-  academicYearId: uuid('academic_year_id').notNull()
-    .references(() => academicYear.id, { onDelete: 'restrict' }),
-
-  termId: uuid('term_id').references(() => term.id, { onDelete: 'set null' }),
-  subjectId: uuid('subject_id').references(() => subject.id, { onDelete: 'restrict' }),
-
-  takenOn: date('taken_on').notNull(),
-  takenByProfileId: uuid('taken_by_profile_id').notNull()
-    .references(() => profiles.id, { onDelete: 'restrict' }),
-
-  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
-  finalizedAt: timestamp('finalized_at', { withTimezone: true }),
-  note: text('note'),
-}, (t) => ({
-  uq: { // unique per section+day+subject (null-safe)
-    columns: [t.classSectionId, t.takenOn, t.subjectId],
-    name: 'uq_session_section_day_subject'
-  }
-}));
-
-export const attendanceRecord = pgTable('attendance_record', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  sessionId: uuid('session_id').notNull()
-    .references(() => attendanceSession.id, { onDelete: 'cascade' }),
-  studentProfileId: uuid('student_profile_id').notNull()
-    .references(() => profiles.id, { onDelete: 'cascade' }),
-  status: attendanceStatus('status').notNull().default('PRESENT'),
-  note: text('note'),
-  markedAt: timestamp('marked_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  uq: { columns: [t.sessionId, t.studentProfileId], name: 'uq_record_session_student' }
-}));
-Note: Some Postgres engines treat UNIQUE (subject_id) with NULLs as allowing multiple NULLs, which is fine (one per section/day with subject NULL). If you want a stricter “null-safe” uniqueness, keep the unique expression in a manual migration:
-
-sql
-Copier le code
-CREATE UNIQUE INDEX IF NOT EXISTS uq_session_section_day_subject_expr
-  ON attendance_session (class_section_id, taken_on, COALESCE(subject_id, '00000000-0000-0000-0000-000000000000')::uuid);
-2) Business Rules
-Who can create/mark
-
-ADMIN/STAFF: any section/subject.
-
-TEACHER: must have an active teaching_assignment (Module 4) for the same class_section_id, same academic_year_id, and:
-
-If subject_id is provided → must match an assignment (same subject and term if provided), OR
-
-If subject_id is null → must be homeroom or any assignment for that section/year.
-
-Student eligibility
-
-Only students with an ACTIVE enrollment (Module 3) in this academic_year_id and class_section_id on taken_on can be marked.
-
-Finalization
-
-After finalized_at is set, only ADMIN can modify records or session meta.
-
-Idempotency
-
-Creating a session with the same (section, taken_on, subject?) returns/conflicts with the existing session.
-
-Defaults
-
-Bulk marking can treat missing students as PRESENT if markMode='delta'. Otherwise, send all.
-
-3) DTOs (Zod)
-ts
-Copier le code
-// src/modules/attendance/dto.ts
-import { z } from 'zod';
-
-export const CreateSessionDto = z.object({
-  classSectionId: z.string().uuid(),
-  academicYearId: z.string().uuid(),
-  termId: z.string().uuid().nullable().optional(),
-  subjectId: z.string().uuid().nullable().optional(), // null => daily/homeroom
-  takenOn: z.coerce.date(),
-  note: z.string().max(300).optional(),
-});
-
-export const BulkMarkDto = z.object({
-  // if true, only the provided student IDs are changed; all others keep existing (or default PRESENT if creating brand new records)
-  markMode: z.enum(['replace','delta']).default('replace'),
-  items: z.array(z.object({
-    studentProfileId: z.string().uuid(),
-    status: z.enum(['PRESENT','ABSENT','LATE','EXCUSED']),
-    note: z.string().max(200).optional(),
-  })).min(1),
-});
-
-export const UpdateRecordDto = z.object({
-  status: z.enum(['PRESENT','ABSENT','LATE','EXCUSED']).optional(),
-  note: z.string().max(200).nullable().optional(),
-});
-
-export const ListSessionsQuery = z.object({
-  classSectionId: z.string().uuid().optional(),
-  academicYearId: z.string().uuid().optional(),
-  subjectId: z.string().uuid().optional(),
+// Audit list query
+export const AuditListQuery = z.object({
+  entityType: z.string().min(1).optional(),
+  entityId: z.string().uuid().optional(),
+  action: z.string().min(1).optional(),
+  actorUserId: z.string().uuid().optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
-  mine: z.enum(['true','false']).optional(), // teacher-only: show only own
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+  // Cursor pagination: ISO timestamp or epoch ms string
+  cursorAt: z.string().optional(),
+  cursorId: z.string().uuid().optional(),
+  q: z.string().min(2).optional(), // search summary/meta when FTS is enabled or fallback to ILIKE
 });
-4) Endpoints (spec)
-Base path: /api/attendance/*
 
-Sessions
-POST /sessions (CreateSessionDto)
-Create (or 409 if conflict). Must pass permission checks.
+// Global search query
+export const SearchQuery = z.object({
+  q: z.string().min(2),
+  types: z.string().optional(), // csv: users,students,teachers,sections,guardians
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+3) RBAC & i18n Helpers
+RBAC: reuse your requireAdmin/requireStaffOrAdmin middlewares from Module 1.
 
-GET /sessions?classSectionId=&academicYearId=&subjectId=&from=&to=&mine=
-List sessions (admins see all; teachers can filter and optionally mine=true).
+i18n: optional but recommended; examples use tReq(req, 'errors.notAllowed') if available.
 
-POST /sessions/:id/finalize
-Set finalized_at (lock). Only ADMIN can re-open (not included here).
+4) Audit Service
+packages/server/src/modules/admin-utils/audit.service.ts
 
-GET /sessions/:id
-Returns session + records.
-
-Records
-POST /sessions/:id/records (BulkMarkDto)
-Upsert many records in one call. Enforces enrollment eligibility.
-
-PATCH /records/:recordId (UpdateRecordDto)
-Update a single record (if not finalized or ADMIN).
-
-Convenience & Reports
-GET /sections/:id/roster?date=YYYY-MM-DD&subjectId=
-Returns roster (enrolled students) with status for that date, creating a virtual PRESENT if no record yet.
-
-GET /students/:profileId/attendance?from=&to=
-Timeline for one student.
-
-GET /sections/:id/summary?from=&to=&subjectId=
-Aggregate counts { present, absent, late, excused } by day.
-
-Error shape: { "error": { "message": "string", "details"?: any } }
-
-5) Route Logic (Express 5 — outline)
 ts
-Copier le code
-// src/modules/attendance/routes.ts
+
+import { db } from '../../db/client';
+import { auditLog } from '../../db/schema/audit';
+
+export type WriteAuditArgs = {
+  action: string;
+  entityType: string;
+  entityId?: string | null;
+  summary: string;
+  meta?: Record<string, unknown> | null;
+  actor?: { userId?: string | null; roles?: string[]; ip?: string | null };
+  at?: Date;
+};
+
+export async function writeAudit(evt: WriteAuditArgs) {
+  await db.insert(auditLog).values({
+    action: evt.action,
+    entityType: evt.entityType,
+    entityId: evt.entityId ?? null,
+    summary: evt.summary,
+    meta: evt.meta ?? null,
+    at: evt.at ?? new Date(),
+    actorUserId: evt.actor?.userId ?? null,
+    actorRoles: evt.actor?.roles ?? null,
+    ip: evt.actor?.ip ?? null,
+  });
+}
+
+export function actorFromReq(req: any) {
+  const u = req?.session?.user;
+  return {
+    userId: u?.id ?? null,
+    roles: Array.isArray(u?.roles) ? u.roles : [],
+    ip: req?.ip ?? null,
+  };
+}
+4.1 Convenience wrappers (optional)
+auditTx(tx, args) if you want to log inside an existing transaction.
+
+auditForMutation(req, kind, entity, id, summary, meta) small helper.
+
+5) Routes — Audit API (ADMIN only)
+Base path: /api/admin/audit
+
+packages/server/src/modules/admin-utils/audit.routes.ts
+
+ts
+
 import { Router } from 'express';
 import { db } from '../../db/client';
-import { validate } from '../../middlewares/validate';
-import { requireAuth } from '../../middlewares/rbac';
-import { attendanceSession, attendanceRecord } from '../../db/schema/attendance';
-import { enrollment } from '../../db/schema/enrollment';
-import { teachingAssignment } from '../../db/schema/teaching';
-import { classSection } from '../../db/schema/academics';
-import { profiles, userRoles, users } from '../../db/schema/identity';
-import { and, eq, between, inArray, isNull, or } from 'drizzle-orm';
-import {
-  CreateSessionDto, BulkMarkDto, UpdateRecordDto
-} from './dto';
+import { auditLog } from '../../db/schema/audit';
+import { and, desc, eq, gte, lte, ilike, lt, or, sql } from 'drizzle-orm';
+import { AuditListQuery } from './dto';
+import { requireAdmin } from '../../middlewares/rbac';
+import { z } from 'zod';
 
-export const attendanceRouter = Router();
-attendanceRouter.use(requireAuth);
+export const auditRouter = Router();
+auditRouter.use(requireAdmin);
 
-// ----- helpers -----
-async function canManageSession(reqUser:{id:string; roles:string[]; profileId?:string}, sectionId:string, yearId:string, subjectId?:string|null) {
-  if (reqUser.roles.includes('ADMIN') || reqUser.roles.includes('STAFF')) return true;
-  if (!reqUser.roles.includes('TEACHER') || !reqUser.profileId) return false;
-  const where = [
-    eq(teachingAssignment.teacherProfileId, reqUser.profileId),
-    eq(teachingAssignment.classSectionId, sectionId),
-    eq(teachingAssignment.academicYearId, yearId),
-  ];
-  if (subjectId) where.push(eq(teachingAssignment.subjectId, subjectId));
-  // allow homeroom on daily session (subjectId null)
-  if (!subjectId) {
-    const rows = await db.select().from(teachingAssignment)
-      .where(and(...where));
-    return rows.some(r => r.isHomeroom || r.subjectId != null);
-  }
-  const rows = await db.select().from(teachingAssignment).where(and(...where));
-  return rows.length > 0;
-}
+// GET /api/admin/audit
+auditRouter.get('/', async (req, res) => {
+  const q = AuditListQuery.parse(req.query);
 
-async function ensureNotFinalized(sessionId:string) {
-  const [s] = await db.select().from(attendanceSession).where(eq(attendanceSession.id, sessionId));
-  if (!s) throw Object.assign(new Error('Session not found'), { status: 404 });
-  if (s.finalizedAt) throw Object.assign(new Error('Session is finalized'), { status: 423 });
-  return s;
-}
-
-// ----- create session -----
-attendanceRouter.post('/sessions', validate(CreateSessionDto), async (req, res, next) => {
-  try {
-    const u = req.session.user!;
-    const { classSectionId, academicYearId, termId=null, subjectId=null, takenOn, note } = req.body;
-
-    if (!(await canManageSession(u as any, classSectionId, academicYearId, subjectId))) {
-      return res.status(403).json({ error: { message: 'Not allowed for this section/subject/year' } });
-    }
-
-    // try to find existing
-    const existing = await db.select().from(attendanceSession)
-      .where(and(
-        eq(attendanceSession.classSectionId, classSectionId),
-        eq(attendanceSession.academicYearId, academicYearId),
-        eq(attendanceSession.takenOn, takenOn as any),
-        subjectId ? eq(attendanceSession.subjectId, subjectId) : isNull(attendanceSession.subjectId)
+  const conds = [];
+  if (q.entityType) conds.push(eq(auditLog.entityType, q.entityType));
+  if (q.entityId) conds.push(eq(auditLog.entityId, q.entityId));
+  if (q.action) conds.push(eq(auditLog.action, q.action));
+  if (q.actorUserId) conds.push(eq(auditLog.actorUserId, q.actorUserId));
+  if (q.from) conds.push(gte(auditLog.at, q.from as any));
+  if (q.to) conds.push(lte(auditLog.at, q.to as any));
+  if (q.cursorAt) {
+    const cursorDate = new Date(q.cursorAt);
+    // stable tie-breaker: (at < cursorAt) OR (at = cursorAt AND id < cursorId)
+    if (q.cursorId) {
+      conds.push(or(
+        lt(auditLog.at, cursorDate as any),
+        and(eq(auditLog.at, cursorDate as any), lt(auditLog.id, q.cursorId as any))
       ));
-    if (existing[0]) return res.status(200).json(existing[0]);
-
-    const [session] = await db.insert(attendanceSession).values({
-      classSectionId, academicYearId, termId, subjectId, takenOn, takenByProfileId: (req.session as any).profileId ?? u.id, note: note ?? null
-    }).returning();
-
-    res.status(201).json(session);
-  } catch (e) { next(e); }
-});
-
-// ----- list sessions -----
-attendanceRouter.get('/sessions', async (req, res) => {
-  const { classSectionId, academicYearId, subjectId, from, to, mine } = req.query as Record<string,string|undefined>;
-  const u = req.session.user!;
-  const where = [];
-  if (classSectionId) where.push(eq(attendanceSession.classSectionId, classSectionId));
-  if (academicYearId) where.push(eq(attendanceSession.academicYearId, academicYearId));
-  if (subjectId) where.push(eq(attendanceSession.subjectId, subjectId));
-  if (from && to) where.push(between(attendanceSession.takenOn, from as any, to as any));
-  if (mine === 'true') where.push(eq(attendanceSession.takenByProfileId, (req.session as any).profileId ?? u.id));
-  const rows = await db.select().from(attendanceSession).where((where as any).length ? (and as any)(...where) : undefined);
-  res.json(rows);
-});
-
-// ----- finalize -----
-attendanceRouter.post('/sessions/:id/finalize', async (req, res) => {
-  const u = req.session.user!;
-  if (!u.roles.includes('ADMIN') && !u.roles.includes('STAFF')) {
-    return res.status(403).json({ error: { message: 'Admin/Staff only' } });
-  }
-  const [row] = await db.update(attendanceSession).set({ finalizedAt: new Date() }).where(eq(attendanceSession.id, req.params.id)).returning();
-  if (!row) return res.status(404).json({ error: { message: 'Session not found' } });
-  res.json({ ok: true });
-});
-
-// ----- bulk mark -----
-attendanceRouter.post('/sessions/:id/records', validate(BulkMarkDto), async (req, res, next) => {
-  try {
-    const s = await ensureNotFinalized(req.params.id);
-    const u = req.session.user!;
-    if (!(await canManageSession(u as any, s.classSectionId, s.academicYearId, s.subjectId))) {
-      return res.status(403).json({ error: { message: 'Not allowed' } });
+    } else {
+      conds.push(lt(auditLog.at, cursorDate as any));
     }
+  }
 
-    // Eligibility: are they enrolled & active in this section/year on takenOn?
-    const studentIds = req.body.items.map(i => i.studentProfileId);
-    const eligible = await db.select({ studentProfileId: enrollment.studentProfileId })
-      .from(enrollment)
-      .where(and(
-        eq(enrollment.academicYearId, s.academicYearId),
-        eq(enrollment.classSectionId, s.classSectionId),
-        inArray(enrollment.studentProfileId, studentIds),
-        eq(enrollment.status, 'ACTIVE')
-      ));
-    const eligibleSet = new Set(eligible.map(e => e.studentProfileId));
-    const invalid = studentIds.filter(id => !eligibleSet.has(id));
-    if (invalid.length) return res.status(400).json({ error: { message: 'Some students not actively enrolled', details: invalid } });
-
-    // Upsert in a tx
-    await db.transaction(async tx => {
-      for (const item of req.body.items) {
-        const existing = await tx.select().from(attendanceRecord)
-          .where(and(eq(attendanceRecord.sessionId, s.id), eq(attendanceRecord.studentProfileId, item.studentProfileId)));
-        if (existing[0]) {
-          await tx.update(attendanceRecord)
-            .set({ status: item.status, note: item.note ?? null, markedAt: new Date() })
-            .where(eq(attendanceRecord.id, existing[0].id));
-        } else {
-          await tx.insert(attendanceRecord).values({
-            sessionId: s.id, studentProfileId: item.studentProfileId, status: item.status, note: item.note ?? null
-          });
-        }
-      }
-    });
-
-    res.json({ ok: true });
-  } catch (e) { next(e); }
-});
-
-// ----- single record update -----
-attendanceRouter.patch('/records/:id', validate(UpdateRecordDto), async (req, res, next) => {
-  try {
-    // guard finalized
-    const [r] = await db.select().from(attendanceRecord).where(eq(attendanceRecord.id, req.params.id));
-    if (!r) return res.status(404).json({ error: { message: 'Record not found' } });
-    await ensureNotFinalized(r.sessionId);
-    await db.update(attendanceRecord).set(req.body).where(eq(attendanceRecord.id, r.id));
-    res.json({ ok: true });
-  } catch (e) { next(e); }
-});
-
-// ----- roster with attendance (day view) -----
-attendanceRouter.get('/sections/:id/roster', async (req, res) => {
-  const sectionId = req.params.id;
-  const dateStr = req.query.date as string;
-  const subjectId = (req.query.subjectId as string) || null;
-
-  if (!dateStr) return res.status(400).json({ error: { message: 'date is required (YYYY-MM-DD)' } });
-
-  // find or not
-  const [s] = await db.select().from(attendanceSession)
-    .where(and(
-      eq(attendanceSession.classSectionId, sectionId),
-      eq(attendanceSession.takenOn, dateStr as any),
-      subjectId ? eq(attendanceSession.subjectId, subjectId) : isNull(attendanceSession.subjectId)
+  // Search text (FTS preferred; fallback ILIKE)
+  if (q.q) {
+    conds.push(or(
+      ilike(auditLog.summary, `%${q.q}%`) as any,
+      ilike(sql`${auditLog.meta}::text`, `%${q.q}%`) as any
     ));
-
-  // active roster (Module 3)
-  const roster = await db.select({
-    studentProfileId: enrollment.studentProfileId,
-  }).from(enrollment).where(and(
-    eq(enrollment.classSectionId, sectionId),
-    eq(enrollment.status, 'ACTIVE')
-  ));
-
-  let records: Record<string, any> = {};
-  if (s) {
-    const recs = await db.select().from(attendanceRecord).where(eq(attendanceRecord.sessionId, s.id));
-    for (const r of recs) records[r.studentProfileId] = r;
+    // If you have FTS column 'tsv', replace with: conds.push(sql`audit_log.tsv @@ websearch_to_tsquery(${q.q})`);
   }
 
-  // return per-student + status (default PRESENT if no record)
-  res.json(roster.map(r => ({
-    studentProfileId: r.studentProfileId,
-    status: records[r.studentProfileId]?.status ?? 'PRESENT',
-    recordId: records[r.studentProfileId]?.id ?? null
-  })));
+  const rows = await db.select().from(auditLog)
+    .where(conds.length ? (and as any)(...conds) : undefined)
+    .orderBy(desc(auditLog.at), desc(auditLog.id))
+    .limit(q.limit);
+
+  const nextCursor = rows.length
+    ? { cursorAt: rows[rows.length - 1].at?.toISOString(), cursorId: rows[rows.length - 1].id }
+    : null;
+
+  res.json({ items: rows, nextCursor });
 });
 
-// ----- student timeline -----
-attendanceRouter.get('/students/:profileId/attendance', async (req, res) => {
-  const pid = req.params.profileId;
-  const { from, to } = req.query as Record<string, string | undefined>;
-  const rows = await db.select({
-    date: attendanceSession.takenOn,
-    sectionId: attendanceSession.classSectionId,
-    subjectId: attendanceSession.subjectId,
-    status: attendanceRecord.status
-  })
-  .from(attendanceRecord)
-  .leftJoin(attendanceSession, eq(attendanceRecord.sessionId, attendanceSession.id))
-  .where(and(
-    eq(attendanceRecord.studentProfileId, pid),
-    from && to ? between(attendanceSession.takenOn, from as any, to as any) : ({} as any)
-  ));
-  res.json(rows);
+// (Optional) GET /api/admin/audit/:id
+auditRouter.get('/:id', async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const rows = await db.select().from(auditLog).where(eq(auditLog.id, id));
+  if (!rows[0]) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Log not found' } });
+  res.json(rows[0]);
 });
+5.1 Integration points — where to call writeAudit
+Call this in Modules 1–5 after successful mutations:
 
-// ----- section summary -----
-attendanceRouter.get('/sections/:id/summary', async (req, res) => {
-  // NOTE: implement an aggregate query in your flavor; or compute in JS
-  res.json({ todo: 'aggregate present/absent/late/excused per day in range' });
+Module 1 (User Management):
+
+USER_CREATE, USER_STATUS_CHANGE, USER_LOCK, USER_UNLOCK, SECRET_RESET
+
+Module 2 (Academics):
+
+STAGE_CREATE, GRADE_LEVEL_UPDATE, CLASS_SECTION_DELETE, etc.
+
+Module 3 (Enrollment):
+
+ENROLL_CREATE, ENROLL_TRANSFER, ENROLL_WITHDRAW, ENROLL_GRADUATE
+
+Module 4 (Teaching):
+
+ASSIGNMENT_CREATE, ASSIGNMENT_UPDATE, HOMEROOM_SET
+
+Module 5 (Attendance):
+
+ATTENDANCE_SESSION_CREATE, ATTENDANCE_BULK_MARK, ATTENDANCE_FINALIZE
+
+Example (Module 3):
+
+ts
+
+await writeAudit({
+  action: 'ENROLL_CREATE',
+  entityType: 'ENROLLMENT',
+  entityId: newEnroll.id,
+  summary: `Enrolled student ${studentProfileId} in section ${classSectionId}`,
+  meta: { academicYearId, rollNo },
+  actor: actorFromReq(req),
 });
-6) Manual Tests (cURL)
+6) Routes — Global Search API
+Base path: /api/admin/search
+RBAC: requireAdmin or requireStaffOrAdmin (choose your policy).
+
+Buckets supported:
+
+users — admin accounts + non-admins (email/loginId)
+
+students — profiles whose user has STUDENT role
+
+teachers — profiles whose user has TEACHER role
+
+sections — classes from academics
+
+(optional) guardians — profiles with GUARDIAN role
+
+packages/server/src/modules/admin-utils/search.routes.ts
+
+ts
+
+import { Router } from 'express';
+import { db } from '../../db/client';
+import { users, userRoles, profiles } from '../../db/schema/identity';
+import { classSection } from '../../db/schema/academics';
+import { and, eq, ilike, inArray, sql } from 'drizzle-orm';
+import { SearchQuery } from './dto';
+import { requireAdmin } from '../../middlewares/rbac';
+
+export const searchRouter = Router();
+// If you want STAFF too: replace requireAdmin with requireStaffOrAdmin
+searchRouter.use(requireAdmin);
+
+searchRouter.get('/', async (req, res) => {
+  const { q, types, limit } = SearchQuery.parse(req.query);
+  const like = `%${q}%`;
+  const buckets = new Set(
+    (types?.split(',').map(s=>s.trim().toLowerCase()) ?? ['users','students','teachers','sections'])
+      .filter(Boolean)
+  );
+
+  const out: Record<string, any[]> = {};
+
+  if (buckets.has('users')) {
+    out.users = await db.select({
+      id: users.id, email: users.email, loginId: users.loginId, isActive: users.isActive,
+    }).from(users)
+      .where(
+        sql`(${users.email} ILIKE ${like} OR ${users.loginId} ILIKE ${like})`
+      ).limit(limit);
+  }
+
+  if (buckets.has('students')) {
+    const stuIds = await db.select({ userId: userRoles.userId })
+      .from(userRoles).where(eq(userRoles.role, 'STUDENT')).limit(10000);
+    const ids = stuIds.map(r=>r.userId);
+    out.students = ids.length ? await db.select({
+      profileId: profiles.id,
+      firstName: profiles.firstName,
+      lastName: profiles.lastName,
+      userId: profiles.userId,
+    }).from(profiles)
+      .where(and(
+        inArray(profiles.userId, ids),
+        sql`(${profiles.firstName} || ' ' || ${profiles.lastName}) ILIKE ${like}`
+      )).limit(limit) : [];
+  }
+
+  if (buckets.has('teachers')) {
+    const teachIds = await db.select({ userId: userRoles.userId })
+      .from(userRoles).where(eq(userRoles.role, 'TEACHER')).limit(10000);
+    const ids = teachIds.map(r=>r.userId);
+    out.teachers = ids.length ? await db.select({
+      profileId: profiles.id,
+      firstName: profiles.firstName,
+      lastName: profiles.lastName,
+      userId: profiles.userId,
+    }).from(profiles)
+      .where(and(
+        inArray(profiles.userId, ids),
+        sql`(${profiles.firstName} || ' ' || ${profiles.lastName}) ILIKE ${like}`
+      )).limit(limit) : [];
+  }
+
+  if (buckets.has('sections')) {
+    out.sections = await db.select({
+      id: classSection.id,
+      name: classSection.name,
+      gradeLevelId: classSection.gradeLevelId,
+      academicYearId: classSection.academicYearId,
+    }).from(classSection)
+      .where(ilike(classSection.name, like) as any)
+      .limit(limit);
+  }
+
+  // Optional guardians
+  if (buckets.has('guardians')) {
+    const guardIds = await db.select({ userId: userRoles.userId })
+      .from(userRoles).where(eq(userRoles.role, 'GUARDIAN')).limit(10000);
+    const ids = guardIds.map(r=>r.userId);
+    out.guardians = ids.length ? await db.select({
+      profileId: profiles.id,
+      firstName: profiles.firstName,
+      lastName: profiles.lastName,
+      userId: profiles.userId,
+    }).from(profiles)
+      .where(and(
+        inArray(profiles.userId, ids),
+        sql`(${profiles.firstName} || ' ' || ${profiles.lastName}) ILIKE ${like}`
+      )).limit(limit) : [];
+  }
+
+  res.json(out);
+});
+7) Wiring (Server App)
+Add routers in your main server:
+
+packages/server/src/app.ts (or server.ts)
+
+ts
+
+import { auditRouter } from './modules/admin-utils/audit.routes';
+import { searchRouter } from './modules/admin-utils/search.routes';
+
+app.use('/api/admin/audit', auditRouter);
+app.use('/api/admin/search', searchRouter);
+8) Error Shape & i18n
+Standardize errors:
+
+json
+
+{ "error": { "code": "NOT_ALLOWED", "message": "Accès non autorisé.", "details": null } }
+Use your localeMiddleware to set req.locale and tReq(req, key) to translate messages.
+
+Return HTTP 4xx/5xx with above JSON.
+
+9) Security & Privacy
+RBAC: keep /admin/audit ADMIN-only. /admin/search can be ADMIN or STAFF (read-only).
+
+Data minimization: never put secrets/passwords/tokens in meta. Prefer IDs and non-sensitive fields.
+
+IP logging: optional; comply with your local policy.
+
+Rate limiting (recommended for search): global/search-specific limiter to avoid abuse.
+
+Pagination: always capped (default limit=100 for audit, 50 for search).
+
+10) Performance
+Use provided indexes: at DESC, (entity_type, entity_id), action, actor_user_id, meta GIN.
+
+For large audit_log, consider partitioning by month or retention (e.g., keep 365 days).
+
+Enable FTS (tsvector + GIN) for fast q search; fallback ILIKE is fine for MVP/small datasets.
+
+11) Client Consumption (examples)
+11.1 Audit Timeline (React Query)
+ts
+
+const { data, fetchNextPage } = useInfiniteQuery({
+  queryKey: ['audit', filters],
+  queryFn: ({ pageParam }) => get<{items:any[]; nextCursor:any}>(
+    `admin/audit?limit=50&${qs(filters)}${pageParam ? `&cursorAt=${pageParam.cursorAt}&cursorId=${pageParam.cursorId}`:''}`
+  ),
+  getNextPageParam: (last) => last.nextCursor ?? undefined,
+});
+11.2 Global Search (Command palette)
+ts
+
+const res = await get<Record<string, any[]>>(`admin/search?q=${encodeURIComponent(q)}&types=users,students,sections,teachers&limit=10`);
+12) Manual Tests (cURL)
 bash
-Copier le code
-# Create a DAILY session (homeroom)
-curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"classSectionId":"<SEC_ID>","academicYearId":"<YEAR_ID>","takenOn":"2025-10-03"}' \
-  http://localhost:4000/api/attendance/sessions
 
-# Create a SUBJECT session (e.g., Physics period)
-curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"classSectionId":"<SEC_ID>","academicYearId":"<YEAR_ID>","subjectId":"<SUBJECT_ID>","termId":"<TERM_ID>","takenOn":"2025-10-03"}' \
-  http://localhost:4000/api/attendance/sessions
+# 1) Create a few logs by performing actions in other modules (e.g., enroll a student)
 
-# Bulk mark (replace mode)
-curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"markMode":"replace","items":[
-        {"studentProfileId":"<STU1>","status":"PRESENT"},
-        {"studentProfileId":"<STU2>","status":"ABSENT","note":"sick"},
-        {"studentProfileId":"<STU3>","status":"LATE"}
-      ]}' \
-  http://localhost:4000/api/attendance/sessions/<SESSION_ID>/records
+# 2) List last 20 logs
+curl -b cookies.txt "http://localhost:4000/api/admin/audit?limit=20"
 
-# Update single record
-curl -b cookies.txt -H "Content-Type: application/json" -X PATCH \
-  -d '{"status":"EXCUSED","note":"medical"}' \
-  http://localhost:4000/api/attendance/records/<RECORD_ID>
+# 3) Filter by entity
+curl -b cookies.txt "http://localhost:4000/api/admin/audit?entityType=ENROLLMENT&limit=10"
 
-# Finalize session (Admin/Staff only)
-curl -b cookies.txt -X POST http://localhost:4000/api/attendance/sessions/<SESSION_ID>/finalize
+# 4) Filter by action within date range, with text search
+curl -b cookies.txt "http://localhost:4000/api/admin/audit?action=ATTENDANCE_FINALIZE&from=2025-09-01&to=2025-12-31&q=section"
 
-# Day roster with statuses (default PRESENT if unset)
-curl -b cookies.txt "http://localhost:4000/api/attendance/sections/<SEC_ID>/roster?date=2025-10-03"
+# 5) Cursor pagination
+curl -s -b cookies.txt "http://localhost:4000/api/admin/audit?limit=5" | jq .
+# take nextCursor values and pass them:
+curl -b cookies.txt "http://localhost:4000/api/admin/audit?limit=5&cursorAt=2025-10-01T08:00:00.000Z&cursorId=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
-# Student timeline (date range)
-curl -b cookies.txt "http://localhost:4000/api/attendance/students/<STU_ID>/attendance?from=2025-09-01&to=2025-12-31"
-7) Acceptance Criteria
-Can create daily or per-subject attendance sessions, enforcing teacher permissions from Module 4.
+# 6) Global search (all buckets)
+curl -b cookies.txt "http://localhost:4000/api/admin/search?q=amina"
 
-Can bulk mark and edit attendance for eligible (actively enrolled) students.
+# 7) Global search (only sections)
+curl -b cookies.txt "http://localhost:4000/api/admin/search?q=Term&types=sections&limit=10"
+13) OpenAPI (fragment)
+yaml
 
-Uniqueness: one session per (section, date, subject?) and one record per (session, student).
+paths:
+  /api/admin/audit:
+    get:
+      summary: List audit logs
+      parameters:
+        - in: query; name: entityType; schema: { type: string }
+        - in: query; name: entityId; schema: { type: string, format: uuid }
+        - in: query; name: action; schema: { type: string }
+        - in: query; name: actorUserId; schema: { type: string, format: uuid }
+        - in: query; name: from; schema: { type: string, format: date-time }
+        - in: query; name: to; schema: { type: string, format: date-time }
+        - in: query; name: q; schema: { type: string, minLength: 2 }
+        - in: query; name: limit; schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+        - in: query; name: cursorAt; schema: { type: string }
+        - in: query; name: cursorId; schema: { type: string, format: uuid }
+      responses:
+        '200': { description: ok }
+  /api/admin/search:
+    get:
+      summary: Global search (users, students, teachers, sections, guardians)
+      parameters:
+        - in: query; name: q; required: true; schema: { type: string, minLength: 2 }
+        - in: query; name: types; schema: { type: string, description: "csv list" }
+        - in: query; name: limit; schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200': { description: ok }
+14) Retention & Maintenance (recommended)
+Retention job (daily): delete logs older than N days (e.g., 365), or archive them.
 
-Finalize locks a session; only ADMIN can change afterward.
+Archive: INSERT INTO audit_archive SELECT * FROM audit_log WHERE at < now() - interval '365 days'; DELETE ...
 
-Can fetch roster with statuses for a particular date, and a student timeline.
+Backup: ensure DB backups include audit_log.
 
-Error responses are consistent; validation and rule checks prevent invalid operations.
+15) Definition of Done
+ audit_log table created with all indexes; optional FTS configured if needed.
 
-8) Notes & Extensions
-Add per-session window (e.g., can edit until 23:59 of taken_on).
+ Service writeAudit() callable from any module; **actorFromReq()` implemented.
 
-Add audit_log (who marked what and when).
+ Routers mounted: GET /api/admin/audit (ADMIN), GET /api/admin/search (ADMIN or STAFF).
 
-Add CSV export for day or range.
+ RBAC enforced; error shape consistent; i18n messages wired (if enabled).
 
-Add attendance thresholds to flag chronic absence/late.
+ Pagination (cursor) works and stable (uses (at,id)).
 
-Optimize reporting using materialized views if needed.
+ Manual tests pass; client timeline and global search show expected results.
+
+ No sensitive data leaked in meta; IP policy decided & documented.
+
+16) Appendix — Example Audit Calls (per module)
+User created (Module 1)
+
+ts
+
+await writeAudit({ action:'USER_CREATE', entityType:'USER', entityId:user.id,
+  summary:`Created user ${user.id} (${role})`, meta:{ role, email:user.email, loginId:user.loginId },
+  actor: actorFromReq(req) });
+Section created (Module 2)
+
+ts
+
+await writeAudit({ action:'SECTION_CREATE', entityType:'CLASS_SECTION', entityId:section.id,
+  summary:`Created section ${section.name}`, meta:{ gradeLevelId: section.gradeLevelId, yearId: section.academicYearId },
+  actor: actorFromReq(req) });
+Enroll transfer (Module 3)
+
+ts
+
+await writeAudit({ action:'ENROLL_TRANSFER', entityType:'ENROLLMENT', entityId:newEnroll.id,
+  summary:`Transferred ${studentProfileId} to ${toSectionId}`, meta:{ from: fromSectionId, to: toSectionId, yearId },
+  actor: actorFromReq(req) });
+Assignment create (Module 4)
+
+ts
+
+await writeAudit({ action:'ASSIGNMENT_CREATE', entityType:'TEACHING_ASSIGNMENT', entityId:assign.id,
+  summary:`Teacher ${teacherProfileId} -> section ${classSectionId} (${subjectId})`, meta:{ yearId, termId },
+  actor: actorFromReq(req) });
+Attendance finalize (Module 5)
+
+ts
+
+
+await writeAudit({ action:'ATTENDANCE_FINALIZE', entityType:'ATTENDANCE_SESSION', entityId:session.id,
+  summary:`Finalized attendance for section ${sectionId} on ${takenOn}`, meta:{ subjectId, counts },
+  actor: actorFromReq(req) });
+✅ Drop this file at packages/server/CLAUDE.module-6-admin-utils.md.
+Implement the schema and routes exactly as shown, then wire the writeAudit() calls across Modules 1–5.

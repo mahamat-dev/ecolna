@@ -9,6 +9,7 @@ import { EmailLoginDto, IdLoginDto, CreateUserDto, UpdateStatusDto, UpdateProfil
 import * as svc from './service';
 import { hash as argon2Hash } from '@node-rs/argon2';
 import { makeLoginId, randomSecret } from './codegen';
+import { writeAudit, actorFromReq } from '../../utils/audit';
 
 export const identityRouter = Router();
 
@@ -41,12 +42,35 @@ identityRouter.get('/me', async (req, res) => {
 
 identityRouter.post('/admin/users', requireAdmin, validate(CreateUserDto), async (req, res) => {
   const { role, email, password, firstName, lastName, phone } = req.body;
+  const actor = actorFromReq(req);
   if (role === 'ADMIN') {
     if (!email || !password) return res.status(400).json({ error: { message: 'Admin requires email & password' } });
     const out = await svc.createAdmin(email, password, firstName, lastName, phone);
+    await writeAudit(db, {
+      action: 'IDENTITY_USER_CREATE',
+      entityType: 'user',
+      entityId: out.userId,
+      summary: `Created ADMIN user ${out.userId}`,
+      meta: { role: 'ADMIN', profileId: out.profileId, email },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
     return res.status(201).json({ ...out, email });
   } else {
     const out = await svc.createNonAdmin(role, firstName, lastName, phone, password);
+    await writeAudit(db, {
+      action: 'IDENTITY_USER_CREATE',
+      entityType: 'user',
+      entityId: out.userId,
+      summary: `Created ${role} user ${out.userId}`,
+      meta: { role, profileId: out.profileId },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
     return res.status(201).json(out);
   }
 });
@@ -70,6 +94,19 @@ identityRouter.patch('/admin/users/:id/status', requireAdmin, validate(UpdateSta
   const userId = req.params.id;
   if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
   await db.update(users).set({ isActive: req.body.isActive }).where(eq(users.id, userId));
+  // Audit: user status update
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'IDENTITY_USER_STATUS_UPDATE',
+    entityType: 'user',
+    entityId: userId,
+    summary: `Set isActive=${req.body.isActive} for user ${userId}`,
+    meta: { isActive: req.body.isActive },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
   res.json({ ok: true });
 });
 
@@ -78,6 +115,19 @@ identityRouter.post('/admin/users/:id/lock', requireAdmin, async (req, res) => {
   if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
   const until = new Date(Date.now() + 15*60*1000);
   await db.update(users).set({ lockedUntil: until }).where(eq(users.id, userId));
+  // Audit: user lock
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'IDENTITY_USER_LOCK',
+    entityType: 'user',
+    entityId: userId,
+    summary: `Locked user ${userId} until ${until.toISOString()}`,
+    meta: { until: until.toISOString() },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
   res.json({ lockedUntil: until.toISOString() });
 });
 
@@ -85,6 +135,19 @@ identityRouter.post('/admin/users/:id/unlock', requireAdmin, async (req, res) =>
   const userId = req.params.id;
   if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
   await db.update(users).set({ lockedUntil: null, failedLogins: 0 }).where(eq(users.id, userId));
+  // Audit: user unlock
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'IDENTITY_USER_UNLOCK',
+    entityType: 'user',
+    entityId: userId,
+    summary: `Unlocked user ${userId}`,
+    meta: { unlocked: true },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
   res.json({ ok: true });
 });
 
@@ -97,6 +160,19 @@ identityRouter.post('/admin/users/:id/reset-secret', requireAdmin, async (req, r
   const newSecret = randomSecret(12);
   const passwordHash = await argon2Hash(newSecret);
   await db.update(users).set({ passwordHash, secretUpdatedAt: new Date() }).where(eq(users.id, u.id));
+  // Audit: reset secret (do not include secret value)
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'IDENTITY_RESET_SECRET',
+    entityType: 'user',
+    entityId: userId,
+    summary: `Reset secret for user ${userId}`,
+    meta: { rotated: true },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
   res.json({ newSecret });
 });
 
@@ -110,6 +186,19 @@ identityRouter.post('/admin/users/:id/rotate-login-id', requireAdmin, async (req
   const any = roles.find(r => r.role !== 'ADMIN');
   const newLoginId = makeLoginId((any?.role as any) ?? 'STUDENT');
   await db.update(users).set({ loginId: newLoginId }).where(eq(users.id, u.id));
+  // Audit: rotate login id (do not include new loginId value)
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'IDENTITY_ROTATE_LOGIN_ID',
+    entityType: 'user',
+    entityId: userId,
+    summary: `Rotated login_id for user ${userId}`,
+    meta: { rotated: true },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
   res.json({ newLoginId });
 });
 
@@ -128,6 +217,20 @@ identityRouter.patch('/admin/profiles/:id', requireAdmin, validate(UpdateProfile
     ...(region    !== undefined && { region }),
     ...(country   !== undefined && { country }),
   }).where(eq(profiles.id, profileId));
+  // Audit: profile update (track updated fields only)
+  const actor = actorFromReq(req);
+  const updatedKeys = Object.keys(req.body).filter(k => (req.body as any)[k] !== undefined);
+  await writeAudit(db, {
+    action: 'IDENTITY_PROFILE_UPDATE',
+    entityType: 'profile',
+    entityId: profileId,
+    summary: `Updated profile ${profileId} fields: ${updatedKeys.join(', ') || 'none'}`,
+    meta: { updatedFields: updatedKeys },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
   res.json({ ok: true });
 });
 

@@ -6,6 +6,7 @@ import { CreateSessionDto, FinalizeSessionDto, BulkMarkDto } from './dto';
 import { and, between, desc, eq, gte, lte } from 'drizzle-orm';
 import { attendanceRecord, attendanceSession } from '../../db/schema/attendance';
 import { enrollment as enrollmentTbl } from '../../db/schema/enrollment';
+import { writeAudit, actorFromReq } from '../../utils/audit';
 
 const router = Router();
 router.use(requireAdmin);
@@ -24,7 +25,7 @@ router.post('/sessions', validate(CreateSessionDto), async (req, res) => {
   const body = req.body;
   const date = parseDate(body.date);
   try {
-    const [row] = await db.insert(attendanceSession).values({
+    const rows = await db.insert(attendanceSession).values({
       classSectionId: body.classSectionId,
       subjectId: body.subjectId ?? null,
       academicYearId: body.academicYearId,
@@ -35,6 +36,23 @@ router.post('/sessions', validate(CreateSessionDto), async (req, res) => {
       takenByProfileId: body.takenByProfileId ?? null,
       notes: body.notes ?? null,
     }).returning();
+    const row = rows[0];
+    if (!row) throw Object.assign(new Error('Failed to create session'), { status: 500 });
+
+    // Audit: session created
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      action: 'ATTENDANCE_SESSION_CREATE',
+      entityType: 'attendance_session',
+      entityId: row.id,
+      summary: `Created session on ${row.date} ${row.startsAt}-${row.endsAt} for class ${row.classSectionId}${row.subjectId ? ` subject ${row.subjectId}` : ''}`,
+      meta: { payload: body },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
+
     res.status(201).json(row);
   } catch (e: any) {
     res.status(e.status ?? 400).json({ error: { message: e.message } });
@@ -47,6 +65,21 @@ router.patch('/sessions/:id/finalize', validate(FinalizeSessionDto), async (req,
   const [existing] = await db.select().from(attendanceSession).where(eq(attendanceSession.id, id));
   if (!existing) return res.status(404).json({ error: { message: 'Session not found' } });
   await db.update(attendanceSession).set({ isFinalized: true }).where(eq(attendanceSession.id, id));
+
+  // Audit: session finalized
+  const actor = actorFromReq(req);
+  await writeAudit(db, {
+    action: 'ATTENDANCE_SESSION_FINALIZE',
+    entityType: 'attendance_session',
+    entityId: id,
+    summary: `Finalized session on ${existing.date} for class ${existing.classSectionId}${existing.subjectId ? ` subject ${existing.subjectId}` : ''}`,
+    meta: { sessionId: id },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
+
   res.json({ ok: true });
 });
 
@@ -58,9 +91,13 @@ router.post('/sessions/:id/bulk-mark', validate(BulkMarkDto), async (req, res) =
   if (session.isFinalized) return res.status(400).json({ error: { message: 'Session is finalized' } });
   const date = parseDate(session.date as unknown as string);
 
+  const actor = actorFromReq(req);
+  const stats: Record<string, number> = {};
+
   await db.transaction(async (tx) => {
     for (const r of req.body.records) {
       await ensureActiveEnrollmentForSection(r.enrollmentId, session.classSectionId, date);
+      stats[r.status] = (stats[r.status] || 0) + 1;
       await tx
         .insert(attendanceRecord)
         .values({
@@ -79,6 +116,19 @@ router.post('/sessions/:id/bulk-mark', validate(BulkMarkDto), async (req, res) =
           },
         });
     }
+
+    // Audit: bulk mark within same transaction
+    await writeAudit(tx, {
+      action: 'ATTENDANCE_BULK_MARK',
+      entityType: 'attendance_session',
+      entityId: id,
+      summary: `Bulk marked ${req.body.records?.length ?? 0} records for session ${id}`,
+      meta: { sessionId: id, stats, records: req.body.records },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
   });
 
   res.json({ ok: true });

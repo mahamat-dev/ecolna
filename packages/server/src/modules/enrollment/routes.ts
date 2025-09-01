@@ -10,7 +10,7 @@ import {
   SetRollNoDto, LinkGuardianDto, UnlinkGuardianDto
 } from './dto';
 import { and, eq, count } from 'drizzle-orm';
-import { logAuditEvent, getActorFromRequest } from '../../utils/audit';
+import { writeAudit, actorFromReq } from '../../utils/audit';
 
 const router = Router();
 router.use(requireAdmin);
@@ -58,22 +58,25 @@ router.post('/enrollments', validate(EnrollDto), async (req, res) => {
         status: 'ACTIVE', joinedOn: joinedOn ?? null, rollNo: rollNo ?? null
       }).returning();
       
-      // Log audit event
-       if (newEnrollment) {
-         await logAuditEvent(tx, {
-           actorProfileId: getActorFromRequest(req),
-           action: 'ENROLL',
-           entityType: 'enrollment',
-           entityId: newEnrollment.id,
-           description: `Student enrolled in class section`,
-           metadata: {
-             studentProfileId,
-             classSectionId,
-             academicYearId,
-             rollNo: rollNo ?? null
-           }
-         });
-       }
+      // Audit
+      if (newEnrollment) {
+        const actor = actorFromReq(req);
+        await writeAudit(tx, {
+          actorUserId: actor.userId ?? null,
+          actorRoles: actor.roles ?? null,
+          ip: actor.ip ?? null,
+          action: 'ENROLL',
+          entityType: 'enrollment',
+          entityId: newEnrollment.id,
+          summary: 'Student enrolled in class section',
+          meta: {
+            studentProfileId,
+            classSectionId,
+            academicYearId,
+            rollNo: rollNo ?? null,
+          },
+        });
+      }
     });
     
     res.status(201).json({ ok: true });
@@ -131,21 +134,24 @@ router.post('/enrollments/transfer', validate(TransferDto), async (req, res) => 
          status: 'ACTIVE', joinedOn: effectiveOn ?? null, rollNo: newRollNo ?? null
        }).returning();
        
-       // Log audit event
+       // Audit
        if (newEnrollment) {
-         await logAuditEvent(tx, {
-           actorProfileId: getActorFromRequest(req),
+         const actor = actorFromReq(req);
+         await writeAudit(tx, {
+           actorUserId: actor.userId ?? null,
+           actorRoles: actor.roles ?? null,
+           ip: actor.ip ?? null,
            action: 'TRANSFER',
            entityType: 'enrollment',
            entityId: newEnrollment.id,
-           description: `Student transferred between class sections`,
-           metadata: {
+           summary: 'Student transferred between class sections',
+           meta: {
              studentProfileId,
              fromClassSectionId,
              toClassSectionId,
              academicYearId,
-             newRollNo: newRollNo ?? null
-           }
+             newRollNo: newRollNo ?? null,
+           },
          });
        }
     });
@@ -176,20 +182,25 @@ router.post('/enrollments/withdraw', validate(WithdrawDto), async (req, res) => 
   
   if (!row) return res.status(404).json({ error: { message: 'Active enrollment not found' } });
   
-  // Log audit event
-  await logAuditEvent(db, {
-    actorProfileId: getActorFromRequest(req),
-    action: 'WITHDRAW',
-    entityType: 'enrollment',
-    entityId: row.id,
-    description: `Student withdrawn from class section`,
-    metadata: {
-      studentProfileId,
-      classSectionId,
-      academicYearId,
-      reason: reason ?? null
-    }
-  });
+  // Audit
+  {
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      action: 'WITHDRAW',
+      entityType: 'enrollment',
+      entityId: row.id,
+      summary: 'Student withdrawn from class section',
+      meta: {
+        studentProfileId,
+        classSectionId,
+        academicYearId,
+        reason: reason ?? null,
+      },
+    });
+  }
   
   res.json({ ok: true });
 });
@@ -206,19 +217,24 @@ router.post('/enrollments/graduate', validate(GraduateDto), async (req, res) => 
   
   if (!row) return res.status(404).json({ error: { message: 'Active enrollment not found' } });
   
-  // Log audit event
-  await logAuditEvent(db, {
-    actorProfileId: getActorFromRequest(req),
-    action: 'GRADUATE',
-    entityType: 'enrollment',
-    entityId: row.id,
-    description: `Student graduated`,
-    metadata: {
-      studentProfileId,
-      academicYearId,
-      graduatedOn: graduatedOn ?? null
-    }
-  });
+  // Audit
+  {
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      action: 'GRADUATE',
+      entityType: 'enrollment',
+      entityId: row.id,
+      summary: 'Student graduated',
+      meta: {
+        studentProfileId,
+        academicYearId,
+        graduatedOn: graduatedOn ?? null,
+      },
+    });
+  }
   
   res.json({ ok: true });
 });
@@ -290,19 +306,25 @@ router.post('/links/guardian-student', validate(LinkGuardianDto), async (req, re
        guardianProfileId, studentProfileId, linkType: linkType ?? null, isPrimary: !!isPrimary,
      });
      
-     // Log audit event
-     await logAuditEvent(tx, {
-       actorProfileId: getActorFromRequest(req),
-       action: 'LINK_GUARDIAN',
-       entityType: 'guardian_student',
-       description: `Guardian linked to student`,
-       metadata: {
-         guardianProfileId,
-         studentProfileId,
-         linkType: linkType ?? null,
-         isPrimary: !!isPrimary
-       }
-     });
+     // Audit
+     {
+       const actor = actorFromReq(req);
+       await writeAudit(tx, {
+         actorUserId: actor.userId ?? null,
+         actorRoles: actor.roles ?? null,
+         ip: actor.ip ?? null,
+         action: 'LINK_GUARDIAN',
+         entityType: 'guardian_student',
+         entityId: null,
+         summary: 'Guardian linked to student',
+         meta: {
+           guardianProfileId,
+           studentProfileId,
+           linkType: linkType ?? null,
+           isPrimary: !!isPrimary,
+         },
+       });
+     }
   });
   
   res.status(201).json({ ok: true });
@@ -316,17 +338,23 @@ router.delete('/links/guardian-student', validate(UnlinkGuardianDto), async (req
   
   if (!row) return res.status(404).json({ error: { message: 'Link not found' } });
   
-  // Log audit event
-  await logAuditEvent(db, {
-    actorProfileId: getActorFromRequest(req),
-    action: 'UNLINK_GUARDIAN',
-    entityType: 'guardian_student',
-    description: `Guardian unlinked from student`,
-    metadata: {
-      guardianProfileId,
-      studentProfileId
-    }
-  });
+  // Audit
+  {
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      action: 'UNLINK_GUARDIAN',
+      entityType: 'guardian_student',
+      entityId: null,
+      summary: 'Guardian unlinked from student',
+      meta: {
+        guardianProfileId,
+        studentProfileId,
+      },
+    });
+  }
   
   res.json({ ok: true });
 });
