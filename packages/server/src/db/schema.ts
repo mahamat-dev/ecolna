@@ -8,8 +8,10 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
-export * from './schema/identity';
-export * from './schema/academics';
+export * from './schema/identity.ts';
+export * from './schema/academics.ts';
+export * from './schema/enrollment.ts';
+export * from './schema/audit.ts';
 
 export const users = pgTable('users', {
    id: serial('id').primaryKey(),
