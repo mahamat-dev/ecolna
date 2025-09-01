@@ -7,6 +7,8 @@ import teachingRouter from '../modules/teaching/routes.ts';
 import attendanceRouter from '../modules/attendance/routes.ts';
 import { auditRouter } from '../modules/admin-utils/audit.routes';
 import { searchRouter } from '../modules/admin-utils/search.routes';
+import { filesRouter } from '../modules/content/files.routes';
+import { notesRouter } from '../modules/content/notes.routes';
 
 const router = Router();
 
@@ -18,5 +20,7 @@ router.use('/teaching', teachingRouter);
 router.use('/attendance', attendanceRouter);
 router.use('/admin/audit', auditRouter);
 router.use('/admin/search', searchRouter);
+router.use('/content', filesRouter);
+router.use('/content', notesRouter);
 
 export default router;
