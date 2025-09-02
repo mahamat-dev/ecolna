@@ -14,6 +14,8 @@ export * from './schema/enrollment.ts';
 export * from './schema/audit.ts';
 export * from './schema/teaching.ts';
 export * from './schema/attendance.ts';
+export * from './schema/content.ts';
+export * from './schema/assess.ts';
 
 export const users = pgTable('users', {
    id: serial('id').primaryKey(),

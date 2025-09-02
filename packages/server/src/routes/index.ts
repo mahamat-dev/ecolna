@@ -9,6 +9,7 @@ import { auditRouter } from '../modules/admin-utils/audit.routes';
 import { searchRouter } from '../modules/admin-utils/search.routes';
 import { filesRouter } from '../modules/content/files.routes';
 import { notesRouter } from '../modules/content/notes.routes';
+import assessmentsRouter from '../modules/assessments/routes.ts';
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use('/admin/audit', auditRouter);
 router.use('/admin/search', searchRouter);
 router.use('/content', filesRouter);
 router.use('/content', notesRouter);
+router.use('/assessments', assessmentsRouter);
 
 export default router;

@@ -19,6 +19,9 @@ identityRouter.post('/auth/login-email', rateLimit, validate(EmailLoginDto), asy
   const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
   if(!roles.find(r => r.role === 'ADMIN')) return res.status(403).json({ error: { message: 'Admin only' } });
   (req.session as any).user = { id: u.id, email: u.email!, roles: roles.map(r=>r.role as any) };
+  // Attach profileId to session for downstream modules
+  const [p] = await db.select().from(profiles).where(eq(profiles.userId, u.id));
+  (req.session as any).profileId = p?.id ?? null;
   res.json({ userId: u.id, roles: roles.map(r=>r.role) });
 });
 
@@ -27,6 +30,9 @@ identityRouter.post('/auth/login-id', rateLimit, validate(IdLoginDto), async (re
   if(!u) return res.status(401).json({ error: { message: 'Invalid credentials' } });
   const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
   (req.session as any).user = { id: u.id, loginId: u.loginId!, roles: roles.map(r=>r.role as any) };
+  // Attach profileId to session for downstream modules
+  const [p] = await db.select().from(profiles).where(eq(profiles.userId, u.id));
+  (req.session as any).profileId = p?.id ?? null;
   res.json({ userId: u.id, loginId: u.loginId, roles: roles.map(r=>r.role) });
 });
 
@@ -50,143 +56,59 @@ identityRouter.post('/admin/users', requireAdmin, validate(CreateUserDto), async
       action: 'IDENTITY_USER_CREATE',
       entityType: 'user',
       entityId: out.userId,
-      summary: `Created ADMIN user ${out.userId}`,
-      meta: { role: 'ADMIN', profileId: out.profileId, email },
+      summary: `Created ${role} ${out.userId}`,
+      meta: { role, email },
       actorUserId: actor.userId ?? null,
       actorRoles: actor.roles ?? null,
       ip: actor.ip ?? null,
       at: new Date(),
     });
-    return res.status(201).json({ ...out, email });
-  } else {
-    const out = await svc.createNonAdmin(role, firstName, lastName, phone, password);
-    await writeAudit(db, {
-      action: 'IDENTITY_USER_CREATE',
-      entityType: 'user',
-      entityId: out.userId,
-      summary: `Created ${role} user ${out.userId}`,
-      meta: { role, profileId: out.profileId },
-      actorUserId: actor.userId ?? null,
-      actorRoles: actor.roles ?? null,
-      ip: actor.ip ?? null,
-      at: new Date(),
-    });
-    return res.status(201).json(out);
+    return res.json(out);
   }
-});
-
-identityRouter.get('/admin/users', requireAdmin, async (_req, res) => {
-  const data = await db.select().from(users);
-  res.json(data);
-});
-
-identityRouter.get('/admin/users/:id', requireAdmin, async (req, res) => {
-  const userId = req.params.id;
-  if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
-  const [u] = await db.select().from(users).where(eq(users.id, userId));
-  if(!u) return res.status(404).json({ error: { message: 'User not found' } });
-  const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  const [p] = await db.select().from(profiles).where(eq(profiles.userId, u.id));
-  res.json({ user: u, roles: roles.map(r=>r.role), profile: p ?? null });
+  if (!firstName || !lastName) return res.status(400).json({ error: { message: 'firstName & lastName required' } });
+  const out = await svc.createNonAdmin(role as 'STUDENT'|'GUARDIAN'|'STAFF'|'TEACHER', firstName, lastName, phone, password);
+  await writeAudit(db, {
+    action: 'IDENTITY_USER_CREATE',
+    entityType: 'user',
+    entityId: out.userId,
+    summary: `Created ${role} ${out.userId}`,
+    meta: { role },
+    actorUserId: actor.userId ?? null,
+    actorRoles: actor.roles ?? null,
+    ip: actor.ip ?? null,
+    at: new Date(),
+  });
+  res.json(out);
 });
 
 identityRouter.patch('/admin/users/:id/status', requireAdmin, validate(UpdateStatusDto), async (req, res) => {
   const userId = req.params.id;
   if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
-  await db.update(users).set({ isActive: req.body.isActive }).where(eq(users.id, userId));
-  // Audit: user status update
+  const { isActive } = req.body;
+  await db.update(users).set({ isActive }).where(eq(users.id, userId));
   const actor = actorFromReq(req);
   await writeAudit(db, {
-    action: 'IDENTITY_USER_STATUS_UPDATE',
+    action: 'IDENTITY_USER_UPDATE_STATUS',
     entityType: 'user',
     entityId: userId,
-    summary: `Set isActive=${req.body.isActive} for user ${userId}`,
-    meta: { isActive: req.body.isActive },
+    summary: `Updated isActive of user ${userId} to ${isActive}`,
+    meta: { isActive },
     actorUserId: actor.userId ?? null,
     actorRoles: actor.roles ?? null,
     ip: actor.ip ?? null,
     at: new Date(),
   });
   res.json({ ok: true });
-});
-
-identityRouter.post('/admin/users/:id/lock', requireAdmin, async (req, res) => {
-  const userId = req.params.id;
-  if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
-  const until = new Date(Date.now() + 15*60*1000);
-  await db.update(users).set({ lockedUntil: until }).where(eq(users.id, userId));
-  // Audit: user lock
-  const actor = actorFromReq(req);
-  await writeAudit(db, {
-    action: 'IDENTITY_USER_LOCK',
-    entityType: 'user',
-    entityId: userId,
-    summary: `Locked user ${userId} until ${until.toISOString()}`,
-    meta: { until: until.toISOString() },
-    actorUserId: actor.userId ?? null,
-    actorRoles: actor.roles ?? null,
-    ip: actor.ip ?? null,
-    at: new Date(),
-  });
-  res.json({ lockedUntil: until.toISOString() });
-});
-
-identityRouter.post('/admin/users/:id/unlock', requireAdmin, async (req, res) => {
-  const userId = req.params.id;
-  if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
-  await db.update(users).set({ lockedUntil: null, failedLogins: 0 }).where(eq(users.id, userId));
-  // Audit: user unlock
-  const actor = actorFromReq(req);
-  await writeAudit(db, {
-    action: 'IDENTITY_USER_UNLOCK',
-    entityType: 'user',
-    entityId: userId,
-    summary: `Unlocked user ${userId}`,
-    meta: { unlocked: true },
-    actorUserId: actor.userId ?? null,
-    actorRoles: actor.roles ?? null,
-    ip: actor.ip ?? null,
-    at: new Date(),
-  });
-  res.json({ ok: true });
-});
-
-identityRouter.post('/admin/users/:id/reset-secret', requireAdmin, async (req, res) => {
-  const userId = req.params.id;
-  if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
-  const [u] = await db.select().from(users).where(eq(users.id, userId));
-  if(!u) return res.status(404).json({ error: { message: 'User not found' } });
-  if(u.authMethod !== 'LOGIN_ID') return res.status(400).json({ error: { message: 'Only non-admin users have secrets' } });
-  const newSecret = randomSecret(12);
-  const passwordHash = await argon2Hash(newSecret);
-  await db.update(users).set({ passwordHash, secretUpdatedAt: new Date() }).where(eq(users.id, u.id));
-  // Audit: reset secret (do not include secret value)
-  const actor = actorFromReq(req);
-  await writeAudit(db, {
-    action: 'IDENTITY_RESET_SECRET',
-    entityType: 'user',
-    entityId: userId,
-    summary: `Reset secret for user ${userId}`,
-    meta: { rotated: true },
-    actorUserId: actor.userId ?? null,
-    actorRoles: actor.roles ?? null,
-    ip: actor.ip ?? null,
-    at: new Date(),
-  });
-  res.json({ newSecret });
 });
 
 identityRouter.post('/admin/users/:id/rotate-login-id', requireAdmin, async (req, res) => {
   const userId = req.params.id;
   if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
-  const [u] = await db.select().from(users).where(eq(users.id, userId));
-  if(!u) return res.status(404).json({ error: { message: 'User not found' } });
-  if(u.authMethod !== 'LOGIN_ID') return res.status(400).json({ error: { message: 'Only non-admin users have login_id' } });
-  const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  const any = roles.find(r => r.role !== 'ADMIN');
-  const newLoginId = makeLoginId((any?.role as any) ?? 'STUDENT');
-  await db.update(users).set({ loginId: newLoginId }).where(eq(users.id, u.id));
-  // Audit: rotate login id (do not include new loginId value)
+  const newLoginId = makeLoginId('STUDENT');
+  const newSecret = randomSecret(12);
+  const hash = await argon2Hash(newSecret);
+  await db.update(users).set({ loginId: newLoginId, passwordHash: hash, secretUpdatedAt: new Date() }).where(eq(users.id, userId));
+
   const actor = actorFromReq(req);
   await writeAudit(db, {
     action: 'IDENTITY_ROTATE_LOGIN_ID',

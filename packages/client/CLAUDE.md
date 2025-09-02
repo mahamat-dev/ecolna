@@ -640,7 +640,7 @@ export const contentI18n = {
 
 ---
 
-## 14) 
+## 14)  Enhancements
 
 * Rich Markdown editor (toolbar, preview, paste images → upload).
 * Audience autocomplete (fetch class sections, subjects, students) with async Combobox.
