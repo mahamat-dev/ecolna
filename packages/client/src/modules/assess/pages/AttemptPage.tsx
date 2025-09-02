@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom';
 import { useAttempt, useSubmitAnswers, useFinishAttempt } from '@/modules/assess/hooks';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AttemptContent } from '@/modules/assess/types';
 
@@ -42,7 +42,7 @@ export default function AttemptPage() {
     });
   };
 
-  const onSave = async () => {
+  const onSave = useCallback(async () => {
     if (!data || !attemptId) return;
     setSaving(true);
     try {
@@ -52,7 +52,7 @@ export default function AttemptPage() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [answers, data, attemptId, submitAnswers]);
 
   // Debounced autosave after user changes selection
   useEffect(() => {
@@ -61,7 +61,7 @@ export default function AttemptPage() {
       void onSave();
     }, 1200);
     return () => clearTimeout(handle);
-  }, [answers, attemptId]);
+  }, [answers, attemptId, onSave]);
 
   const onFinish = async () => {
     if (!attemptId) return;
@@ -69,7 +69,6 @@ export default function AttemptPage() {
     try {
       await onSave();
       const res = await finishAttempt.mutateAsync(attemptId);
-      // eslint-disable-next-line no-alert
       alert(`${t('assess.preview')}: ${JSON.stringify(res)}`);
     } finally {
       setFinishing(false);

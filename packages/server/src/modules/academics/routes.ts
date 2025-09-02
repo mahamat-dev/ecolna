@@ -569,4 +569,25 @@ router.get('/class-sections/:id/subjects', requireAdmin, async (req, res) => {
   res.json(rows);
 });
 
+// Timetable endpoint for authenticated users
+router.get('/timetable/me', async (req, res) => {
+  try {
+    const user = (req.session as any)?.user;
+    if (!user) {
+      return res.status(401).json({ error: { message: 'Not authenticated' } });
+    }
+
+    // For now, return empty timetable - this would need proper timetable schema implementation
+    // This is a placeholder to prevent 404 errors
+    const timetable = {
+      items: []
+    };
+    
+    res.json(timetable);
+  } catch (error) {
+    console.error('Error fetching timetable:', error);
+    res.status(500).json({ error: { message: 'Failed to fetch timetable' } });
+  }
+});
+
 export default router;

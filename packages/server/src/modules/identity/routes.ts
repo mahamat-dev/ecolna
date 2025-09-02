@@ -17,7 +17,6 @@ identityRouter.post('/auth/login-email', rateLimit, validate(EmailLoginDto), asy
   const u = await svc.verifyEmailLogin(req.body.email, req.body.password);
   if(!u) return res.status(401).json({ error: { message: 'Invalid credentials' } });
   const roles = await db.select({ role: userRoles.role }).from(userRoles).where(eq(userRoles.userId, u.id));
-  if(!roles.find(r => r.role === 'ADMIN')) return res.status(403).json({ error: { message: 'Admin only' } });
   (req.session as any).user = { id: u.id, email: u.email!, roles: roles.map(r=>r.role as any) };
   // Attach profileId to session for downstream modules
   const [p] = await db.select().from(profiles).where(eq(profiles.userId, u.id));
@@ -154,6 +153,109 @@ identityRouter.patch('/admin/profiles/:id', requireAdmin, validate(UpdateProfile
     at: new Date(),
   });
   res.json({ ok: true });
+});
+
+// Get all users (admin only)
+identityRouter.get('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const usersWithProfiles = await db.select({
+      id: users.id,
+      email: users.email,
+      loginId: users.loginId,
+      authMethod: users.authMethod,
+      isActive: users.isActive,
+      failedLogins: users.failedLogins,
+      lockedUntil: users.lockedUntil,
+      lastLoginAt: users.lastLoginAt,
+      secretUpdatedAt: users.secretUpdatedAt,
+      createdAt: users.createdAt,
+      profile: {
+        id: profiles.id,
+        firstName: profiles.firstName,
+        lastName: profiles.lastName,
+        phone: profiles.phone,
+        photoUrl: profiles.photoUrl,
+      }
+    })
+    .from(users)
+    .leftJoin(profiles, eq(profiles.userId, users.id));
+
+    // Get roles for each user
+    const usersWithRoles = await Promise.all(
+      usersWithProfiles.map(async (user) => {
+        const roles = await db.select({ role: userRoles.role })
+          .from(userRoles)
+          .where(eq(userRoles.userId, user.id));
+        return {
+          ...user,
+          roles: roles.map(r => r.role)
+        };
+      })
+    );
+
+    res.json(usersWithRoles);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: { message: 'Failed to fetch users' } });
+  }
+});
+
+// Lock user account
+identityRouter.post('/admin/users/:id/lock', requireAdmin, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
+    
+    // Lock for 24 hours
+    const lockUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await db.update(users).set({ lockedUntil: lockUntil }).where(eq(users.id, userId));
+    
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      action: 'IDENTITY_USER_LOCK',
+      entityType: 'user',
+      entityId: userId,
+      summary: `Locked user ${userId} until ${lockUntil.toISOString()}`,
+      meta: { lockedUntil: lockUntil },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
+    
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error locking user:', error);
+    res.status(500).json({ error: { message: 'Failed to lock user' } });
+  }
+});
+
+// Unlock user account
+identityRouter.post('/admin/users/:id/unlock', requireAdmin, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    if (!userId) return res.status(400).json({ error: { message: 'User ID required' } });
+    
+    await db.update(users).set({ lockedUntil: null }).where(eq(users.id, userId));
+    
+    const actor = actorFromReq(req);
+    await writeAudit(db, {
+      action: 'IDENTITY_USER_UNLOCK',
+      entityType: 'user',
+      entityId: userId,
+      summary: `Unlocked user ${userId}`,
+      meta: { unlocked: true },
+      actorUserId: actor.userId ?? null,
+      actorRoles: actor.roles ?? null,
+      ip: actor.ip ?? null,
+      at: new Date(),
+    });
+    
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error unlocking user:', error);
+    res.status(500).json({ error: { message: 'Failed to unlock user' } });
+  }
 });
 
 export default identityRouter;

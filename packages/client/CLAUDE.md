@@ -1,781 +1,324 @@
-# CLAUDE.module-8-client.md
-**Module 8 — Client (Assessments: MCQ / Quizzes & Exams)**  
+# CLAUDE.client-roles.md
+**Multi-Role Client (Teacher • Student • Guardian/Parent • Staff)**  
 _Frontend: React + TypeScript + Vite + Tailwind + shadcn/ui + TanStack Query • i18n (fr default, ar, en)_
 
-Students: list available quizzes, start attempts, answer MCQs (single/multi/true-false), autosave, countdown, submit, view score.  
-Teachers: manage **Question Bank** and **Quizzes** (create/update, audience, schedule, publish), and view **submissions**.
+This guide wires the **client side** for **Modules 1–8** for **non-admin** users, using the server APIs you already have:
+- **M1** Auth/Users/Profiles/Roles
+- **M2** Academics (stages/grades/sections/subjects/timetable)
+- **M3** Enrollment & Guardianship
+- **M4** Teaching Assignments
+- **M5** Attendance
+- **M6** Audit Log (read-only in UI)
+- **M7** Content & Files (notes + local storage)
+- **M8** Assessments (MCQ quizzes)
 
-> Assumes server endpoints from Module 8 (already built). No project bootstrap included.  
-> Uses your existing global **QueryClientProvider** and **i18n** (with `getCurrentLocale()`).
-
----
-
-## 0) Routes & Guards
-
-- **Student**
-  - `/assess` — Available quizzes list
-  - `/assess/attempt/:attemptId` — Attempt player (after start)
-- **Teacher**
-  - `/teacher/assess` — My quizzes
-  - `/teacher/assess/quizzes/new` — Create quiz
-  - `/teacher/assess/quizzes/:quizId/edit` — Edit quiz
-  - `/teacher/assess/quizzes/:quizId/submissions` — Submissions
-  - `/teacher/assess/questions` — Question bank (list/create/edit)
-
-Use your existing `RequireRoles` / `TeacherGuard` components.
+> This file contains **routes**, **RBAC guards**, **core pages**, **API clients**, **hooks**, and **key components** for **Teacher**, **Student**, **Guardian/Parent**, and **Staff** workspaces.  
+> No bootstrap or layout code is included; drop these pieces into your app shell.
 
 ---
 
-## 1) Environment helpers
+## 0) Conventions & Prereqs
+
+- **Auth**: `/api/me` returns `{ user: { id, roles: string[] }, profile: { id, ... } }` (cookie session).  
+- **Locale**: send `Accept-Language` (fr|en|ar). If `ar`, set `dir="rtl"`.
+- **RBAC**: Render pages if user has the required role; hide menu items otherwise.
+- **No password/self-service**: Only admin can change passwords. Do **not** surface change-password UI.
+
+Utilities used below:
 
 ```ts
-// src/lib/env.ts (reuse)
+// src/lib/env.ts
 export const API_URL = import.meta.env.VITE_API_URL as string;
 
-// src/lib/locale.ts
-export function getCurrentLocale(): 'fr'|'en'|'ar' {
-  // return from your i18n store; default to 'fr'
-  return (window.localStorage.getItem('locale') as any) || 'fr';
-}
-export function isRTL(loc: string) { return loc === 'ar'; }
-2) Types (client-side)
-ts
-Copier le code
-// src/modules/assess/types.ts
+// src/lib/i18n.ts
 export type Locale = 'fr'|'en'|'ar';
-export type QuestionType = 'MCQ_SINGLE'|'MCQ_MULTI'|'TRUE_FALSE';
+export function getLocale(): Locale { return (localStorage.getItem('locale') as Locale) || 'fr'; }
+export function isRTL(loc: Locale) { return loc === 'ar'; }
 
-export interface OptionInAttempt {
-  id: string;
-  text: string;            // localized from server
-}
-
-export interface AttemptQuestionPayload {
-  questionId: string;
-  stemMd: string;          // localized MD
-  optionOrder: OptionInAttempt[];
-  points: number | string; // number-like
-}
-
-export interface StartAttemptResponse {
-  attemptId: string;
-  quizId: string;
-  timeLimitSec?: number | null;
-  questions: AttemptQuestionPayload[];
-}
-
-export interface AvailableQuizItem {
-  id: string;
-  openAt?: string | null;
-  closeAt?: string | null;
-  timeLimitSec?: number | null;
-  maxAttempts: number;
-  attemptsRemaining: number;
-}
-
-export interface SaveAnswersPayload {
-  answers: { questionId: string; selectedOptionIds: string[] }[];
-}
-
-export interface GradeResult {
-  score: number;
-  maxScore: number;
-}
-
-/** Teacher — Question Bank */
-export interface UpsertQuestionInput {
-  type: QuestionType;
-  subjectId?: string | null;
-  translations: { locale: Locale; stemMd: string; explanationMd?: string | null }[];
-  options: {
-    isCorrect: boolean;
-    weight?: number; // 0..1 for MCQ_MULTI
-    orderIndex?: number;
-    translations: { locale: Locale; text: string }[];
-  }[];
-}
-
-export interface QuizEditorInput {
-  subjectId?: string | null;
-  translations: { locale: Locale; title: string; descriptionMd?: string | null }[];
-  timeLimitSec?: number | null;
-  maxAttempts?: number;
-  shuffleQuestions?: boolean;
-  shuffleOptions?: boolean;
-  openAt?: string | Date | null;
-  closeAt?: string | Date | null;
-  audience: {
-    scope: 'ALL'|'GRADE_LEVEL'|'CLASS_SECTION'|'SUBJECT';
-    gradeLevelId?: string;
-    classSectionId?: string;
-    subjectId?: string;
-  }[];
-  questions: { questionId: string; points?: number; orderIndex?: number }[];
-}
-3) API client
-ts
-Copier le code
-// src/modules/assess/api.ts
-import { API_URL } from '@/lib/env';
-import { getCurrentLocale } from '@/lib/locale';
-import type {
-  AvailableQuizItem, GradeResult, QuizEditorInput, StartAttemptResponse,
-  UpsertQuestionInput, SaveAnswersPayload
-} from './types';
-
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
+// src/lib/http.ts
+export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept-Language': getCurrentLocale(),
-      ...(init?.headers || {})
-    },
+    headers: { 'Content-Type': 'application/json', 'Accept-Language': getLocale(), ...(init?.headers||{}) },
     ...init,
   });
   if (!res.ok) {
-    const err = await res.json().catch(()=>({ error: { message: res.statusText }}));
+    const err = await res.json().catch(()=>({ error:{ message: res.statusText }}));
     throw new Error(err?.error?.message || res.statusText);
   }
   return res.json();
 }
-
-export const AssessAPI = {
-  // Student
-  listAvailable: () => http<{ items: AvailableQuizItem[]; nextCursor?: string|null }>(`/assessments/quizzes/available`),
-  startAttempt: (quizId: string) =>
-    http<StartAttemptResponse>(`/assessments/attempts/start`, { method: 'POST', body: JSON.stringify({ quizId }) }),
-  saveAnswers: (attemptId: string, payload: SaveAnswersPayload) =>
-    http(`/assessments/attempts/${attemptId}/answers`, { method: 'POST', body: JSON.stringify(payload) }),
-  submitAttempt: (attemptId: string) =>
-    http<GradeResult>(`/assessments/attempts/${attemptId}/submit`, { method: 'POST', body: JSON.stringify({}) }),
-  getAttempt: (attemptId: string) =>
-    http(`/assessments/attempts/${attemptId}`),
-
-  // Teacher — Questions
-  createQuestion: (body: UpsertQuestionInput) =>
-    http(`/assessments/questions`, { method: 'POST', body: JSON.stringify(body) }),
-  updateQuestion: (id: string, body: Partial<UpsertQuestionInput>) =>
-    http(`/assessments/questions/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  listQuestions: (query?: { subjectId?: string; createdByProfileId?: string }) => {
-    const qs = new URLSearchParams();
-    if (query?.subjectId) qs.set('subjectId', query.subjectId);
-    if (query?.createdByProfileId) qs.set('createdByProfileId', query.createdByProfileId);
-    return http(`/assessments/questions?${qs.toString()}`);
-  },
-
-  // Teacher — Quizzes
-  createQuiz: (body: QuizEditorInput) =>
-    http(`/assessments/quizzes`, { method: 'POST', body: JSON.stringify(body) }),
-  updateQuiz: (id: string, body: Partial<QuizEditorInput>) =>
-    http(`/assessments/quizzes/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  publishQuiz: (id: string, publish: boolean) =>
-    http(`/assessments/quizzes/${id}/publish`, { method: 'POST', body: JSON.stringify({ publish }) }),
-  // Submissions
-  listSubmissions: (quizId: string) =>
-    http(`/assessments/teacher/quizzes/${quizId}/submissions`),
-};
-4) Hooks (TanStack Query)
+1) Global Auth & Guards
 ts
 Copier le code
-// src/modules/assess/hooks.ts
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AssessAPI } from './api';
-import type { QuizEditorInput, UpsertQuestionInput, SaveAnswersPayload } from './types';
-
-export function useAvailableQuizzes() {
-  return useQuery({ queryKey: ['assess','available'], queryFn: AssessAPI.listAvailable, staleTime: 30_000 });
+// src/modules/auth/types.ts
+export interface Me {
+  user: { id: string; roles: string[] };
+  profile: { id: string; code?: string; firstName?: string; lastName?: string };
 }
 
-export function useStartAttempt() {
-  return useMutation({ mutationFn: (quizId: string) => AssessAPI.startAttempt(quizId) });
-}
-export function useSaveAnswers(attemptId: string) {
-  return useMutation({ mutationFn: (payload: SaveAnswersPayload) => AssessAPI.saveAnswers(attemptId, payload) });
-}
-export function useSubmitAttempt(attemptId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => AssessAPI.submitAttempt(attemptId),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['assess','attempt',attemptId] }); }
-  });
-}
-export function useAttempt(attemptId: string) {
-  return useQuery({ queryKey: ['assess','attempt',attemptId], queryFn: () => AssessAPI.getAttempt(attemptId), enabled: !!attemptId });
+// src/modules/auth/api.ts
+import { http } from '@/lib/http';
+export const AuthAPI = { me: () => http<Me>('/me') };
+
+// src/modules/auth/hooks.ts
+import { useQuery } from '@tanstack/react-query';
+export function useMe() {
+  return useQuery({ queryKey: ['me'], queryFn: AuthAPI.me, staleTime: 60_000 });
 }
 
-// Teacher
-export function useCreateQuestion() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: UpsertQuestionInput) => AssessAPI.createQuestion(body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['assess','questions'] }); }
-  });
+// src/modules/auth/guards.tsx
+import { Navigate } from 'react-router-dom';
+export function RequireRoles({ roles, children }:{ roles: string[]; children: React.ReactNode }) {
+  // ADMIN should pass all guards for testing
+  const { data, isLoading } = useMe();
+  if (isLoading) return null;
+  const userRoles = data?.user.roles || [];
+  const ok = userRoles.includes('ADMIN') || roles.some(r => userRoles.includes(r));
+  return ok ? <>{children}</> : <Navigate to="/" replace />;
 }
-export function useUpdateQuestion(id: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: Partial<UpsertQuestionInput>) => AssessAPI.updateQuestion(id, body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['assess','questions'] }); }
-  });
-}
-export function useQuestions(filter?: { subjectId?: string; createdByProfileId?: string }) {
-  return useQuery({ queryKey: ['assess','questions',filter], queryFn: () => AssessAPI.listQuestions(filter) });
-}
+2) Shared API fragments (used across roles)
+ts
+Copier le code
+// src/modules/shared/api.ts
+import { http } from '@/lib/http';
 
-export function useCreateQuiz() {
-  return useMutation({ mutationFn: (body: QuizEditorInput) => AssessAPI.createQuiz(body) });
-}
-export function useUpdateQuiz(id: string) {
-  return useMutation({ mutationFn: (body: Partial<QuizEditorInput>) => AssessAPI.updateQuiz(id, body) });
-}
-export function usePublishQuiz(id: string) {
-  return useMutation({ mutationFn: (publish: boolean) => AssessAPI.publishQuiz(id, publish) });
-}
-export function useSubmissions(quizId: string) {
-  return useQuery({ queryKey: ['assess','submissions',quizId], queryFn: () => AssessAPI.listSubmissions(quizId), enabled: !!quizId });
-}
-5) Student Components
-5.1 Available Quizzes
+/** Content (Module 7) */
+export const ContentAPI = {
+  listNotes: (params: { limit?: number; cursor?: string|null; locale?: string } = {}) => {
+    const qs = new URLSearchParams({
+      limit: String(params.limit ?? 20),
+      audience: 'any',
+      ...(params.cursor ? { cursor: params.cursor } : {}),
+      ...(params.locale ? { locale: params.locale } : {})
+    });
+    return http<{ items: { id: string; title: string; publishedAt?: string|null; pinUntil?: string|null }[]; nextCursor?: string|null }>(`/content/notes?${qs}`);
+  },
+  getNote: (id: string, locale?: string) => http(`/content/notes/${id}${locale ? `?locale=${locale}`:''}`),
+  markRead: (id: string) => http(`/content/notes/${id}/read`, { method: 'POST', body: JSON.stringify({}) }),
+};
+
+/** Attendance (Module 5) */
+export const AttendanceAPI = {
+  sectionForDate: (sectionId: string, dateISO: string) => http(`/attendance/sections/${sectionId}?date=${encodeURIComponent(dateISO)}`),
+  markSection: (sectionId: string, payload: { date: string; marks: { studentProfileId: string; status: 'PRESENT'|'ABSENT'|'LATE'|'EXCUSED'|null; note?: string|null }[] }) =>
+    http(`/attendance/sections/${sectionId}/mark`, { method: 'POST', body: JSON.stringify(payload) }),
+  mySummary: (from: string, to: string) => http(`/attendance/me?from=${from}&to=${to}`), // student
+  studentSummary: (profileId: string, from: string, to: string) => http(`/attendance/students/${profileId}?from=${from}&to=${to}`), // guardian/staff
+};
+
+/** Academics (Module 2) */
+export const AcademicsAPI = {
+  myTimetable: (dateISO: string) => http(`/academics/timetable/me?date=${encodeURIComponent(dateISO)}`),
+  mySectionsTaught: () => http(`/teaching/assignments/me`), // teacher
+  mySections: () => http(`/enrollment/me/sections`),        // student
+  sectionRoster: (sectionId: string) => http(`/enrollment/sections/${sectionId}/students`),
+};
+
+/** Assessments (Module 8) */
+export const AssessAPI = {
+  available: () => http(`/assessments/quizzes/available`),
+  start: (quizId: string) => http(`/assessments/attempts/start`, { method: 'POST', body: JSON.stringify({ quizId }) }),
+  save: (attemptId: string, answers: { questionId: string; selectedOptionIds: string[] }[]) =>
+    http(`/assessments/attempts/${attemptId}/answers`, { method: 'POST', body: JSON.stringify({ answers }) }),
+  submit: (attemptId: string) => http(`/assessments/attempts/${attemptId}/submit`, { method: 'POST', body: JSON.stringify({}) }),
+  attempt: (attemptId: string) => http(`/assessments/attempts/${attemptId}`),
+  teacherSubmissions: (quizId: string) => http(`/assessments/teacher/quizzes/${quizId}/submissions`),
+};
+3) Role Workspaces (Routes & Pages)
+3.1 Teacher Workspace (recap)
+You already have this from module-teacher-client. Just ensure these routes exist:
+
+/teacher — Today panel + My sections
+
+/teacher/sections/:sectionId — Roster
+
+/teacher/sections/:sectionId/attendance?date=YYYY-MM-DD — Take attendance
+
+/teacher/notes/new?sectionId= — Compose note (Module 7)
+
+/teacher/assess/* — Question bank & quizzes (Module 8 Client)
+
+Guard with: <RequireRoles roles={['TEACHER','STAFF','ADMIN']}>…</RequireRoles>
+
+3.2 Student Portal
+Routes
+
+/student — Home (feed + timetable)
+
+/student/notes — Notes/Announcements feed
+
+/student/notes/:id — Note detail (signed attachments)
+
+/student/assess — Available quizzes (Module 8)
+
+/student/assess/attempt/:attemptId — Attempt player
+
+/student/attendance — My attendance summary
+
+Pages & Components
+
 tsx
 Copier le code
-// src/modules/assess/components/AvailableList.tsx
-import { useAvailableQuizzes, useStartAttempt } from '../hooks';
-import { Button } from '@/components/ui/button';
-import { useNavigate } from 'react-router-dom';
+// src/modules/student/pages/StudentHomePage.tsx
+import { Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { ContentAPI, AcademicsAPI } from '@/modules/shared/api';
+import { getLocale } from '@/lib/i18n';
 
-export function AvailableList() {
-  const { data, isLoading } = useAvailableQuizzes();
-  const start = useStartAttempt();
-  const nav = useNavigate();
-  const items = data?.items ?? [];
-
+export default function StudentHomePage(){
+  const { data: notes } = useQuery({ queryKey: ['student','notes'], queryFn: () => ContentAPI.listNotes({ limit: 5, locale: getLocale() }) });
+  const { data: tt } = useQuery({ queryKey: ['student','timetable', new Date().toDateString()], queryFn: () => AcademicsAPI.myTimetable(new Date().toISOString().slice(0,10)) });
   return (
-    <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Évaluations disponibles</h2>
-      {isLoading ? <p>Chargement…</p> : (
-        <ul className="space-y-3">
-          {items.map(q => (
-            <li key={q.id} className="border rounded-2xl p-4 flex items-center gap-3">
-              <div className="flex-1">
-                <div className="font-medium">Quiz #{q.id.slice(0,8)}</div>
-                <div className="text-xs opacity-70">
-                  {q.openAt ? new Date(q.openAt).toLocaleString() : '—'} → {q.closeAt ? new Date(q.closeAt).toLocaleString() : '—'}
-                  {' · '}Tentatives: {q.maxAttempts} ({q.attemptsRemaining} restantes)
-                  {q.timeLimitSec ? ` · ${Math.round((q.timeLimitSec)/60)} min` : ''}
-                </div>
-              </div>
-              <Button
-                disabled={start.isPending || q.attemptsRemaining <= 0}
-                onClick={() => start.mutate(q.id, {
-                  onSuccess: (res) => nav(`/assess/attempt/${res.attemptId}`, { state: res })
-                })}
-              >
-                Commencer
-              </Button>
+    <div className="grid gap-6 md:grid-cols-2">
+      <section className="border rounded-2xl p-4">
+        <h3 className="font-semibold mb-2">Annonces récentes</h3>
+        <ul className="space-y-2">
+          {(notes?.items || []).map(n => (
+            <li key={n.id} className="flex items-center justify-between">
+              <Link className="text-blue-600 hover:underline" to={`/student/notes/${n.id}`}>{n.title}</Link>
+              <span className="text-xs opacity-70">{n.publishedAt && new Date(n.publishedAt).toLocaleDateString()}</span>
             </li>
           ))}
-          {!items.length && <li>Aucun quiz pour le moment.</li>}
+          {!notes?.items?.length && <li className="text-sm opacity-70">Aucune annonce.</li>}
+        </ul>
+      </section>
+      <section className="border rounded-2xl p-4">
+        <h3 className="font-semibold mb-2">Cours aujourd’hui</h3>
+        <ul className="space-y-2">
+          {(tt?.items || []).map((c:any)=>(
+            <li key={`${c.sectionId}-${c.startsAt}`} className="flex items-center justify-between">
+              <span>{c.sectionName} — {c.subjectName}</span>
+              <span className="text-xs opacity-70">{new Date(c.startsAt).toLocaleTimeString()}–{new Date(c.endsAt).toLocaleTimeString()}</span>
+            </li>
+          ))}
+          {!tt?.items?.length && <li className="text-sm opacity-70">Pas de cours programmés.</li>}
+        </ul>
+      </section>
+    </div>
+  );
+}
+tsx
+Copier le code
+// src/modules/student/pages/StudentNotesPage.tsx
+import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
+import { ContentAPI } from '@/modules/shared/api';
+import { getLocale } from '@/lib/i18n';
+
+export default function StudentNotesPage(){
+  const { data, isLoading } = useQuery({ queryKey: ['student','notes','all'], queryFn: () => ContentAPI.listNotes({ limit: 20, locale: getLocale() }) });
+  return (
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Annonces</h2>
+      {isLoading ? <p>Chargement…</p> : (
+        <ul className="divide-y rounded-2xl border">
+          {(data?.items || []).map(n => (
+            <li key={n.id} className="p-3 flex items-center justify-between">
+              <Link className="text-blue-600 hover:underline" to={`/student/notes/${n.id}`}>{n.title}</Link>
+              <span className="text-xs opacity-70">{n.publishedAt && new Date(n.publishedAt).toLocaleString()}</span>
+            </li>
+          ))}
         </ul>
       )}
     </div>
   );
 }
-5.2 Attempt Player (autosave + timer)
-tsx
-Copier le code
-// src/modules/assess/components/AttemptPlayer.tsx
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useParams, useNavigate } from 'react-router-dom';
-import { useSaveAnswers, useSubmitAttempt } from '../hooks';
-import type { StartAttemptResponse } from '../types';
+
+// src/modules/student/pages/StudentNoteDetailPage.tsx
+import { useParams } from 'react-router-dom';
+import { useQuery, useMutation } from '@tanstack/react-query';
+import { ContentAPI } from '@/modules/shared/api';
+import { getLocale } from '@/lib/i18n';
 import { Button } from '@/components/ui/button';
 
-type SelMap = Record<string, Set<string>>; // questionId -> selected option ids
-
-export default function AttemptPlayer(){
-  const { attemptId } = useParams();
-  const nav = useNavigate();
-  const state = useLocation().state as StartAttemptResponse | undefined;
-
-  // If user refreshed, we need state; in MVP, redirect back if missing
-  const [meta] = useState<StartAttemptResponse | null>(state ?? null);
-  const [index, setIndex] = useState(0);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-
-  const questions = meta?.questions ?? [];
-  const q = questions[index];
-
-  // Local selection state
-  const [sel, setSel] = useState<SelMap>({});
-  const save = useSaveAnswers(attemptId!);
-  const submit = useSubmitAttempt(attemptId!);
-
-  // Autosave (debounced)
-  const debounceRef = useRef<number>();
-  function scheduleSave(){
-    if (!meta) return;
-    window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => {
-      const payload = {
-        answers: Object.entries(sel).map(([questionId, set]) => ({
-          questionId, selectedOptionIds: Array.from(set)
-        }))
-      };
-      save.mutate(payload as any);
-    }, 800);
-  }
-
-  // Timer
-  const startTimeRef = useRef<number>(Date.now());
-  const [remaining, setRemaining] = useState<number | null>(meta?.timeLimitSec ?? null);
-  useEffect(() => {
-    if (!meta?.timeLimitSec) return;
-    const id = window.setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startTimeRef.current)/1000);
-      const left = Math.max(0, (meta.timeLimitSec ?? 0) - elapsed);
-      setRemaining(left);
-      if (left <= 0) { handleSubmit(); }
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [meta?.timeLimitSec]);
-
-  useEffect(() => {
-    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, []);
-
-  if (!meta || !attemptId) {
-    return <div className="space-y-2">
-      <p className="text-red-600">Session perdue. Retour.</p>
-      <Button onClick={()=>nav('/assess', { replace: true })}>Retour</Button>
-    </div>;
-  }
-
-  function toggle(questionId: string, optionId: string, multi=false) {
-    setSel(prev => {
-      const next: SelMap = { ...prev };
-      const cur = new Set(next[questionId] || []);
-      if (multi) {
-        if (cur.has(optionId)) cur.delete(optionId); else cur.add(optionId);
-        next[questionId] = cur;
-      } else {
-        next[questionId] = new Set([optionId]);
-      }
-      return next;
-    });
-    scheduleSave();
-  }
-
-  async function handleSubmit() {
-    setSubmitError(null);
-    try {
-      // final save before submit
-      const payload = {
-        answers: Object.entries(sel).map(([questionId, set]) => ({
-          questionId, selectedOptionIds: Array.from(set)
-        }))
-      };
-      if ((payload.answers?.length ?? 0) > 0) {
-        await save.mutateAsync(payload as any).catch(()=>{ /* ignore transient */ });
-      }
-      const res = await submit.mutateAsync();
-      alert(`Score: ${res.score}/${res.maxScore}`);
-      nav('/assess', { replace: true });
-    } catch (e: any) {
-      setSubmitError(e.message || 'Erreur lors de la soumission');
-    }
-  }
-
-  const pct = meta.timeLimitSec ? Math.round(((remaining ?? meta.timeLimitSec)/(meta.timeLimitSec))*100) : null;
-
+export default function StudentNoteDetailPage(){
+  const { id } = useParams();
+  const { data, isLoading } = useQuery({ queryKey: ['student','note',id], queryFn: () => ContentAPI.getNote(id!, getLocale()) });
+  const mark = useMutation({ mutationFn: () => ContentAPI.markRead(id!) });
+  if (isLoading) return <p>Chargement…</p>;
+  if (!data) return <p>Introuvable.</p>;
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-3">
-        <div className="font-semibold">Question {index+1}/{questions.length}</div>
-        {remaining !== null && (
-          <div className="ml-auto flex items-center gap-2">
-            <div className="text-sm tabular-nums">{Math.floor((remaining)/60)}:{String((remaining)%60).padStart(2,'0')}</div>
-            <div aria-hidden className="h-2 w-40 bg-gray-200 rounded">
-              <div className="h-2 bg-gray-600 rounded" style={{ width: `${pct}%` }} />
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* stem (basic) */}
-      <article className="prose max-w-none border rounded-xl p-3" dangerouslySetInnerHTML={{ __html: mdToHtml(q.stemMd) }} />
-
-      <ul className="space-y-2">
-        {q.optionOrder.map(opt => {
-          const selected = sel[q.questionId]?.has(opt.id) ?? false;
-          const multi = true; // we don't know single/multi per question from payload; treat multi-friendly
-          return (
-            <li key={opt.id}>
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type={multi ? 'checkbox' : 'radio'}
-                  checked={selected}
-                  onChange={()=>toggle(q.questionId, opt.id, /*multi*/ true)}
-                />
-                <span dangerouslySetInnerHTML={{ __html: mdToHtml(opt.text) }} />
-              </label>
-            </li>
-          );
-        })}
-      </ul>
-
-      <div className="flex items-center gap-2">
-        <Button variant="outline" disabled={index===0} onClick={()=>setIndex(i => Math.max(0, i-1))}>Précédent</Button>
-        <Button variant="outline" disabled={index===questions.length-1} onClick={()=>setIndex(i => Math.min(questions.length-1, i+1))}>Suivant</Button>
-        <Button className="ml-auto" onClick={handleSubmit} disabled={submit.isPending}>Soumettre</Button>
-      </div>
-
-      {submitError && <p className="text-sm text-red-600">{submitError}</p>}
-      {save.isPending && <p className="text-xs opacity-70">Sauvegarde…</p>}
-    </div>
-  );
-}
-
-// super-simple placeholder (replace with real renderer/sanitizer)
-function mdToHtml(md: string){ 
-  const esc = (s:string)=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]!));
-  return `<pre>${esc(md||'')}</pre>`;
-}
-Note: Because the start payload doesn’t include the question type, the UI uses checkboxes. If you extend the server to include type per question in the attempt payload, switch input to radio for MCQ_SINGLE and TRUE_FALSE.
-
-6) Teacher Components (Question Bank & Quizzes)
-6.1 Question Editor (multilingual options)
-tsx
-Copier le code
-// src/modules/assess/components/QuestionEditor.tsx
-import { useState } from 'react';
-import type { Locale, UpsertQuestionInput } from '../types';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-
-const LOCALES: Locale[] = ['fr','en','ar'];
-
-export function QuestionEditor({
-  initial,
-  onSubmit,
-  submitting,
-}: {
-  initial?: Partial<UpsertQuestionInput>;
-  submitting?: boolean;
-  onSubmit: (val: UpsertQuestionInput) => void;
-}) {
-  const [type, setType] = useState<UpsertQuestionInput['type']>(initial?.type || 'MCQ_SINGLE');
-  const [translations, setTranslations] = useState<UpsertQuestionInput['translations']>(initial?.translations || [
-    { locale:'fr', stemMd:'', explanationMd:'' }
-  ]);
-  const [options, setOptions] = useState<UpsertQuestionInput['options']>(initial?.options || [
-    { isCorrect: true, translations: [{ locale:'fr', text:'' }] },
-    { isCorrect: false, translations: [{ locale:'fr', text:'' }] },
-  ]);
-
-  function setStem(loc: Locale, patch: Partial<{ stemMd: string; explanationMd?: string|null }>) {
-    const next = [...translations];
-    const i = next.findIndex(t => t.locale === loc);
-    if (i >= 0) next[i] = { ...next[i], ...patch } as any;
-    else next.push({ locale: loc, stemMd: patch.stemMd || '', explanationMd: patch.explanationMd || '' });
-    setTranslations(next);
-  }
-  function setOptText(idx: number, loc: Locale, text: string) {
-    const next = [...options];
-    const arr = next[idx].translations;
-    const j = arr.findIndex(t => t.locale === loc);
-    if (j >= 0) arr[j] = { locale: loc, text }; else arr.push({ locale: loc, text });
-    setOptions(next);
-  }
-  function addOption() {
-    setOptions(o => [...o, { isCorrect: false, translations: [{ locale:'fr', text:'' }] }]);
-  }
-  function removeOption(i: number) {
-    setOptions(o => o.filter((_,idx)=>idx!==i));
-  }
-  function toggleCorrect(i: number) {
-    setOptions(o => o.map((opt, idx) => idx===i
-      ? { ...opt, isCorrect: !opt.isCorrect }
-      : (type==='MCQ_SINGLE' || type==='TRUE_FALSE') ? { ...opt, isCorrect: false } : opt
-    ));
-  }
-
-  function submit() {
-    onSubmit({
-      type,
-      translations,
-      subjectId: initial?.subjectId ?? null,
-      options: options.map((o, i) => ({ ...o, orderIndex: i }))
-    });
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="grid gap-2 md:grid-cols-3">
-        <label className="text-sm">Type
-          <select className="w-full border rounded px-2 py-2" value={type} onChange={e=>setType(e.target.value as any)}>
-            <option value="MCQ_SINGLE">MCQ (une seule)</option>
-            <option value="MCQ_MULTI">MCQ (multiples)</option>
-            <option value="TRUE_FALSE">Vrai/Faux</option>
-          </select>
-        </label>
-      </div>
-
-      <section className="space-y-2">
-        <h4 className="font-semibold">Énoncé</h4>
-        <div className="grid gap-4 md:grid-cols-3">
-          {LOCALES.map(loc => (
-            <div key={loc} className="border rounded-xl p-3 space-y-2">
-              <div className="text-xs uppercase opacity-70">{loc}</div>
-              <Textarea rows={6} placeholder="Énoncé (Markdown)" value={translations.find(t=>t.locale===loc)?.stemMd || ''} onChange={e=>setStem(loc, { stemMd: e.target.value })} />
-              <Textarea rows={4} placeholder="Explication (après soumission)" value={translations.find(t=>t.locale===loc)?.explanationMd || ''} onChange={e=>setStem(loc, { explanationMd: e.target.value })} />
-            </div>
+    <article className="space-y-3">
+      <header className="flex items-center gap-2">
+        <h2 className="text-xl font-semibold">{data.translation?.title}</h2>
+        <span className="text-xs opacity-70 ml-auto">{data.publishedAt && new Date(data.publishedAt).toLocaleString()}</span>
+      </header>
+      {data.translation?.bodyMd && <pre className="border rounded-xl p-3 whitespace-pre-wrap">{data.translation.bodyMd}</pre>}
+      {data.attachments?.length ? (
+        <ul className="space-y-2">
+          {data.attachments.map((a:any)=>(
+            <li key={a.fileId}><a className="text-blue-600 hover:underline" href={a.url} target="_blank" rel="noreferrer">{a.filename} ({Math.round((a.sizeBytes||0)/1024)} KB)</a></li>
           ))}
-        </div>
-      </section>
-
-      <section className="space-y-2">
-        <div className="flex items-center gap-2">
-          <h4 className="font-semibold flex-1">Options</h4>
-          <Button variant="outline" onClick={addOption}>Ajouter</Button>
-        </div>
-        <div className="space-y-3">
-          {options.map((opt, i) => (
-            <div key={i} className="border rounded-2xl p-3 space-y-2">
-              <div className="flex items-center gap-2">
-                <label className="text-sm flex items-center gap-2">
-                  <input type="checkbox" checked={!!opt.isCorrect} onChange={()=>toggleCorrect(i)} />
-                  Correcte
-                </label>
-                <Button variant="ghost" size="sm" onClick={()=>removeOption(i)}>Supprimer</Button>
-              </div>
-              <div className="grid gap-3 md:grid-cols-3">
-                {LOCALES.map(loc => (
-                  <Input key={loc} placeholder={`Texte (${loc})`} value={opt.translations.find(t=>t.locale===loc)?.text || ''} onChange={e=>setOptText(i, loc, e.target.value)} />
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <Button onClick={submit} disabled={submitting}>Enregistrer</Button>
-    </div>
+        </ul>
+      ) : null}
+      <Button size="sm" onClick={()=>mark.mutate()} disabled={mark.isPending}>Marquer comme lu</Button>
+    </article>
   );
 }
-6.2 Quiz Editor (audience, schedule, questions pick)
 tsx
 Copier le code
-// src/modules/assess/components/QuizEditor.tsx
-import { useEffect, useState } from 'react';
-import type { Locale, QuizEditorInput } from '../types';
+// src/modules/student/pages/StudentAssessPage.tsx
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { AssessAPI } from '@/modules/shared/api';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { useQuestions } from '../hooks';
-
-const LOCALES: Locale[] = ['fr','en','ar'];
-
-export function QuizEditor({
-  initial,
-  onSubmit,
-  submitting,
-}: {
-  initial?: Partial<QuizEditorInput>;
-  submitting?: boolean;
-  onSubmit: (val: QuizEditorInput) => void;
-}) {
-  const [translations, setTranslations] = useState<QuizEditorInput['translations']>(initial?.translations || [{ locale:'fr', title:'', descriptionMd:'' }]);
-  const [openAt, setOpenAt] = useState<string>(initial?.openAt as any || '');
-  const [closeAt, setCloseAt] = useState<string>(initial?.closeAt as any || '');
-  const [timeLimitSec, setTimeLimitSec] = useState<number | ''>(initial?.timeLimitSec ?? '');
-  const [maxAttempts, setMaxAttempts] = useState<number>(initial?.maxAttempts ?? 1);
-  const [shuffleQuestions, setSQ] = useState<boolean>(initial?.shuffleQuestions ?? true);
-  const [shuffleOptions, setSO] = useState<boolean>(initial?.shuffleOptions ?? true);
-  const [audience, setAudience] = useState<QuizEditorInput['audience']>(initial?.audience || [{ scope: 'ALL' } as any]);
-  const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>(initial?.questions?.map(q=>q.questionId) || []);
-
-  // Pull available questions (you can filter by subject)
-  const { data: qdata } = useQuestions();
-
-  function setTr(loc: Locale, patch: Partial<{ title: string; descriptionMd?: string|null }>) {
-    const next = [...translations];
-    const i = next.findIndex(t => t.locale === loc);
-    if (i >= 0) next[i] = { ...next[i], ...patch } as any;
-    else next.push({ locale: loc, title: patch.title || '', descriptionMd: patch.descriptionMd || '' });
-    setTranslations(next);
-  }
-
-  function submit() {
-    onSubmit({
-      translations,
-      timeLimitSec: timeLimitSec === '' ? null : Number(timeLimitSec),
-      maxAttempts,
-      shuffleQuestions: shuffleQuestions,
-      shuffleOptions: shuffleOptions,
-      openAt: openAt || null,
-      closeAt: closeAt || null,
-      audience,
-      questions: selectedQuestionIds.map((id, i) => ({ questionId: id, points: 1, orderIndex: i })),
-    });
-  }
-
-  return (
-    <div className="space-y-6">
-      <section className="space-y-2">
-        <h4 className="font-semibold">Infos</h4>
-        <div className="grid gap-3 md:grid-cols-3">
-          {LOCALES.map(loc => (
-            <div key={loc} className="border rounded-xl p-3 space-y-2">
-              <div className="text-xs uppercase opacity-70">{loc}</div>
-              <Input placeholder="Titre" value={translations.find(t=>t.locale===loc)?.title || ''} onChange={e=>setTr(loc,{ title:e.target.value })} />
-              <Textarea rows={4} placeholder="Description" value={translations.find(t=>t.locale===loc)?.descriptionMd || ''} onChange={e=>setTr(loc,{ descriptionMd:e.target.value })} />
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="grid gap-4 md:grid-cols-4">
-        <label className="text-sm">Ouverture
-          <Input type="datetime-local" value={openAt} onChange={e=>setOpenAt(e.target.value)} />
-        </label>
-        <label className="text-sm">Fermeture
-          <Input type="datetime-local" value={closeAt} onChange={e=>setCloseAt(e.target.value)} />
-        </label>
-        <label className="text-sm">Durée (sec)
-          <Input type="number" value={timeLimitSec} onChange={e=>setTimeLimitSec(e.target.value===''?'':Number(e.target.value))} />
-        </label>
-        <label className="text-sm">Tentatives max
-          <Input type="number" value={maxAttempts} onChange={e=>setMaxAttempts(Number(e.target.value||1))} />
-        </label>
-        <label className="text-sm flex items-center gap-2">
-          <input type="checkbox" checked={shuffleQuestions} onChange={e=>setSQ(e.target.checked)} />
-          Mélanger questions
-        </label>
-        <label className="text-sm flex items-center gap-2">
-          <input type="checkbox" checked={shuffleOptions} onChange={e=>setSO(e.target.checked)} />
-          Mélanger options
-        </label>
-      </section>
-
-      <section className="space-y-2">
-        <h4 className="font-semibold">Audience</h4>
-        <div className="flex items-center gap-2">
-          <select className="border rounded px-2 py-2" value={audience[0]?.scope} onChange={e=>setAudience([{ scope: e.target.value as any }])}>
-            <option value="ALL">Tous</option>
-            <option value="GRADE_LEVEL">Niveau</option>
-            <option value="CLASS_SECTION">Classe</option>
-            <option value="SUBJECT">Matière</option>
-          </select>
-          {/* Add additional inputs for IDs as needed */}
-        </div>
-      </section>
-
-      <section className="space-y-2">
-        <h4 className="font-semibold">Questions</h4>
-        <div className="grid gap-2">
-          {(qdata as any[] | undefined)?.map((q: any) => {
-            const checked = selectedQuestionIds.includes(q.id);
-            return (
-              <label key={q.id} className="flex items-center gap-2 border p-2 rounded">
-                <input type="checkbox" checked={checked} onChange={(e)=>{
-                  setSelectedQuestionIds(prev => e.target.checked ? [...prev, q.id] : prev.filter(x=>x!==q.id));
-                }} />
-                <span>Q#{q.id.slice(0,8)} · type: {q.type}</span>
-              </label>
-            );
-          })}
-        </div>
-      </section>
-
-      <Button onClick={submit} disabled={submitting}>Enregistrer</Button>
-    </div>
-  );
-}
-6.3 Teacher Pages (list, create, edit, submissions)
-tsx
-Copier le code
-// src/modules/assess/pages/TeacherQuizListPage.tsx
-import { Link } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
-
-export default function TeacherQuizListPage(){
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h2 className="text-xl font-semibold">Mes Quiz</h2>
-        <Link to="/teacher/assess/quizzes/new" className="ml-auto"><Button>Nouveau</Button></Link>
-      </div>
-      {/* You can add a list if you implement a teacher quizzes endpoint */}
-      <p className="text-sm opacity-70">Utilisez la page “Nouveau” pour créer un quiz.</p>
-    </div>
-  );
-}
-
-// src/modules/assess/pages/TeacherQuizCreatePage.tsx
 import { useNavigate } from 'react-router-dom';
-import { QuizEditor } from '../components/QuizEditor';
-import { useCreateQuiz } from '../hooks';
 
-export default function TeacherQuizCreatePage(){
+export default function StudentAssessPage(){
+  const { data, isLoading } = useQuery({ queryKey: ['student','assess','available'], queryFn: AssessAPI.available });
+  const start = useMutation({ mutationFn: (quizId: string) => AssessAPI.start(quizId) });
   const nav = useNavigate();
-  const create = useCreateQuiz();
+
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Créer un quiz</h2>
-      <QuizEditor submitting={create.isPending} onSubmit={(val)=>create.mutate(val, {
-        onSuccess: (q:any) => nav(`/teacher/assess/quizzes/${q.id}/edit`)
-      })}/>
+      <h2 className="text-xl font-semibold">Évaluations disponibles</h2>
+      {isLoading ? <p>Chargement…</p> : (
+        <ul className="space-y-2">
+          {(data?.items || []).map(q => (
+            <li key={q.id} className="border rounded-2xl p-3 flex items-center gap-2">
+              <div className="flex-1 text-sm">
+                <div className="font-medium">Quiz #{q.id.slice(0,8)}</div>
+                <div className="opacity-70">{q.openAt && new Date(q.openAt).toLocaleString()} → {q.closeAt && new Date(q.closeAt).toLocaleString()} · {q.timeLimitSec ? `${Math.round(q.timeLimitSec/60)} min` : '—'}</div>
+              </div>
+              <Button onClick={()=>start.mutate(q.id, { onSuccess: (r)=> nav(`/student/assess/attempt/${r.attemptId}`, { state: r }) })} disabled={q.attemptsRemaining<=0}>Commencer</Button>
+            </li>
+          ))}
+          {!data?.items?.length && <li className="text-sm opacity-70">Rien pour l’instant.</li>}
+        </ul>
+      )}
     </div>
   );
 }
+Use the Attempt Player from Module 8 Client (/student/assess/attempt/:attemptId).
 
-// src/modules/assess/pages/TeacherQuizEditPage.tsx
-import { useParams } from 'react-router-dom';
-import { QuizEditor } from '../components/QuizEditor';
-import { usePublishQuiz, useUpdateQuiz } from '../hooks';
-import { Button } from '@/components/ui/button';
+tsx
+Copier le code
+// src/modules/student/pages/StudentAttendancePage.tsx
+import { useQuery } from '@tanstack/react-query';
+import { AttendanceAPI } from '@/modules/shared/api';
 
-export default function TeacherQuizEditPage(){
-  const { quizId } = useParams();
-  const upd = useUpdateQuiz(quizId!);
-  const pub = usePublishQuiz(quizId!);
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h2 className="text-xl font-semibold">Modifier le quiz</h2>
-        <Button variant="outline" onClick={()=>pub.mutate(true)} disabled={pub.isPending}>Publier</Button>
-        <Button variant="outline" onClick={()=>pub.mutate(false)} disabled={pub.isPending}>Dépublier</Button>
-      </div>
-      <QuizEditor submitting={upd.isPending} onSubmit={(val)=>upd.mutate(val)} />
-    </div>
-  );
+function range(days=30){
+  const end = new Date(); const start = new Date(); start.setDate(end.getDate()-days);
+  const fmt = (d:Date)=>d.toISOString().slice(0,10);
+  return { from: fmt(start), to: fmt(end) };
 }
 
-// src/modules/assess/pages/TeacherSubmissionsPage.tsx
-import { useParams } from 'react-router-dom';
-import { useSubmissions } from '../hooks';
-
-export default function TeacherSubmissionsPage(){
-  const { quizId } = useParams();
-  const { data, isLoading } = useSubmissions(quizId!);
+export default function StudentAttendancePage(){
+  const { from, to } = range(30);
+  const { data, isLoading } = useQuery({ queryKey: ['student','attendance',from,to], queryFn: () => AttendanceAPI.mySummary(from, to) });
   const rows = (data as any[]) || [];
   return (
-    <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Soumissions</h2>
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Présences (30 jours)</h2>
       {isLoading ? <p>Chargement…</p> : (
-        <table className="min-w-full text-sm">
-          <thead><tr><th className="p-2 text-left">Élève</th><th className="p-2 text-left">Score</th><th className="p-2 text-left">État</th><th className="p-2 text-left">Date</th></tr></thead>
+        <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
+          <thead><tr className="text-left"><th className="p-2">Date</th><th className="p-2">Section</th><th className="p-2">Statut</th></tr></thead>
           <tbody>
             {rows.map((r:any)=>(
-              <tr key={r.id} className="border-t">
-                <td className="p-2">{r.studentProfileId.slice(0,8)}</td>
-                <td className="p-2">{r.score ?? '—'} / {r.maxScore ?? '—'}</td>
+              <tr key={r.date+'-'+r.classSectionId} className="border-t">
+                <td className="p-2">{r.date}</td>
+                <td className="p-2">{r.sectionName}</td>
                 <td className="p-2">{r.status}</td>
-                <td className="p-2">{r.submittedAt ? new Date(r.submittedAt).toLocaleString() : '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -784,144 +327,434 @@ export default function TeacherSubmissionsPage(){
     </div>
   );
 }
-6.4 Question Bank Pages
+Guard
+
 tsx
 Copier le code
-// src/modules/assess/pages/TeacherQuestionsPage.tsx
-import { useCreateQuestion, useQuestions } from '../hooks';
-import { QuestionEditor } from '../components/QuestionEditor';
+// routes
+{ path: '/student', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentHomePage/></RequireRoles> },
+{ path: '/student/notes', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentNotesPage/></RequireRoles> },
+{ path: '/student/notes/:id', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentNoteDetailPage/></RequireRoles> },
+{ path: '/student/assess', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentAssessPage/></RequireRoles> },
+{ path: '/student/assess/attempt/:attemptId', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><AttemptPlayerPage/></RequireRoles> },
+{ path: '/student/attendance', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentAttendancePage/></RequireRoles> },
+3.3 Guardian/Parent Portal
+Routes
 
-export default function TeacherQuestionsPage(){
-  const { data, isLoading } = useQuestions();
-  const create = useCreateQuestion();
+/guardian — Home (children cards)
+
+/guardian/notes — Notes for my children
+
+/guardian/notes/:id — Note detail
+
+/guardian/attendance — Select child → attendance summary
+
+/guardian/assess — Children quiz results (read-only list)
+
+API Assumptions
+
+GET /guardians/me/students → { children: { profileId, firstName, lastName, code }[] }
+
+Attendance & notes visibility leverage existing M3 links and M7/M8 checks.
+
+Pages
+
+tsx
+Copier le code
+// src/modules/guardian/pages/GuardianHomePage.tsx
+import { useQuery } from '@tanstack/react-query';
+import { http } from '@/lib/http';
+
+export default function GuardianHomePage(){
+  const { data, isLoading } = useQuery({ queryKey: ['guardian','children'], queryFn: () => http<{ children: any[] }>('/guardians/me/students') });
+  const kids = data?.children || [];
+  return (
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Mes enfants</h2>
+      {isLoading ? <p>Chargement…</p> : (
+        <ul className="grid gap-3 md:grid-cols-3">
+          {kids.map(k => (
+            <li key={k.profileId} className="border rounded-2xl p-3">
+              <div className="font-medium">{k.lastName} {k.firstName}</div>
+              <div className="text-xs opacity-70">{k.code}</div>
+            </li>
+          ))}
+          {!kids.length && <li className="text-sm opacity-70">Aucun enfant associé.</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+tsx
+Copier le code
+// src/modules/guardian/pages/GuardianAttendancePage.tsx
+import { useQuery } from '@tanstack/react-query';
+import { AttendanceAPI } from '@/modules/shared/api';
+import { useState } from 'react';
+import { http } from '@/lib/http';
+
+export default function GuardianAttendancePage(){
+  const { data } = useQuery({ queryKey: ['guardian','children'], queryFn: () => http<{ children: any[] }>('/guardians/me/students') });
+  const kids = data?.children || [];
+  const [kid, setKid] = useState<string | null>(kids[0]?.profileId || null);
+
+  function range(days=30){ const end=new Date(); const start=new Date(); start.setDate(end.getDate()-days); const fmt=(d:Date)=>d.toISOString().slice(0,10); return { from: fmt(start), to: fmt(end)}}
+  const { from, to } = range(30);
+
+  const q = useQuery({
+    queryKey: ['guardian','attendance',kid,from,to],
+    queryFn: () => AttendanceAPI.studentSummary(kid!, from, to),
+    enabled: !!kid
+  });
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-xl font-semibold">Banque de questions</h2>
-      <div className="rounded-2xl border">
-        <div className="p-3 border-b font-semibold">Questions existantes</div>
-        {isLoading ? <div className="p-3">Chargement…</div> : (
-          <ul className="divide-y">
-            {(data as any[] || []).map((q:any)=>(
-              <li key={q.id} className="p-3 flex items-center justify-between">
-                <div>Q#{q.id.slice(0,8)} · {q.type}</div>
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <h2 className="text-xl font-semibold">Présences</h2>
+        <select className="ml-auto border rounded px-2 py-1" value={kid||''} onChange={e=>setKid(e.target.value)}>
+          {kids.map((k:any)=> <option key={k.profileId} value={k.profileId}>{k.lastName} {k.firstName}</option>)}
+        </select>
+      </div>
+      {q.isLoading ? <p>Chargement…</p> : (
+        <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
+          <thead><tr className="text-left"><th className="p-2">Date</th><th className="p-2">Classe</th><th className="p-2">Statut</th></tr></thead>
+          <tbody>
+            {(q.data as any[]||[]).map((r:any)=>(
+              <tr key={r.date+'-'+r.classSectionId} className="border-t">
+                <td className="p-2">{r.date}</td>
+                <td className="p-2">{r.sectionName}</td>
+                <td className="p-2">{r.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+For guardian Notes and Assessments, reuse Student note detail and a simple list of submissions, filtered per child if you expose endpoints like /guardians/me/assess/submissions.
+
+Guard
+
+tsx
+Copier le code
+{ path: '/guardian', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><GuardianHomePage/></RequireRoles> },
+{ path: '/guardian/attendance', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><GuardianAttendancePage/></RequireRoles> },
+{ path: '/guardian/notes', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><StudentNotesPage/></RequireRoles> },
+{ path: '/guardian/notes/:id', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><StudentNoteDetailPage/></RequireRoles> },
+3.4 Staff Workspace (Registrar/Operations)
+Scope
+
+Enrollment ops: manage students in sections, guardians links.
+
+Attendance supervision: edit/override marks.
+
+Content broadcast: post announcements school-wide (optional; share Teacher note form but with wider audience).
+
+Reports: CSV exports (attendance by date range, note reads).
+
+Routes
+
+/staff — Home (quick links)
+
+/staff/enrollment — Find student & assign/unassign sections
+
+/staff/guardians — Link guardian ↔ student
+
+/staff/attendance — Search and edit attendance by section/date
+
+/staff/reports — Download CSVs
+
+API Assumptions
+
+Enrollment:
+
+GET /enrollment/search?query= → students list
+
+GET /enrollment/students/:profileId/sections
+
+POST /enrollment/students/:profileId/sections { add: [sectionId], remove: [sectionId] }
+
+Guardians:
+
+GET /guardians/search?query= → guardians list
+
+POST /guardians/link { guardianProfileId, studentProfileId }
+
+POST /guardians/unlink { guardianProfileId, studentProfileId }
+
+Attendance editing:
+
+GET /attendance/sections/:sectionId?date=YYYY-MM-DD
+
+POST /attendance/sections/:sectionId/mark (same payload as teacher)
+
+Pages (essential stubs)
+
+tsx
+Copier le code
+// src/modules/staff/pages/StaffHomePage.tsx
+import { Link } from 'react-router-dom';
+export default function StaffHomePage(){
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/enrollment">Inscription / Affectations</Link>
+      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/guardians">Liens Parents</Link>
+      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/attendance">Présences (édition)</Link>
+      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/reports">Rapports</Link>
+    </div>
+  );
+}
+tsx
+Copier le code
+// src/modules/staff/pages/StaffEnrollmentPage.tsx
+import { useState } from 'react';
+import { http } from '@/lib/http';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+
+export default function StaffEnrollmentPage(){
+  const [q, setQ] = useState('');
+  const search = useQuery({ queryKey: ['staff','enroll','search',q], queryFn: () => http(`/enrollment/search?query=${encodeURIComponent(q)}`), enabled: q.length>=2 });
+  const [selected, setSelected] = useState<any|null>(null);
+  const sec = useQuery({ queryKey: ['staff','enroll','sections', selected?.profileId], queryFn: () => http(`/enrollment/students/${selected?.profileId}/sections`), enabled: !!selected });
+
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (body: { add: string[]; remove: string[] }) => http(`/enrollment/students/${selected.profileId}/sections`, { method:'POST', body: JSON.stringify(body) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['staff','enroll','sections', selected?.profileId] })
+  });
+
+  return (
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Inscription / Affectations</h2>
+      <input className="border rounded px-3 py-2 w-full" placeholder="Rechercher un élève…" value={q} onChange={e=>setQ(e.target.value)} />
+      <div className="grid gap-3 md:grid-cols-2">
+        <section className="border rounded-2xl p-3">
+          <h3 className="font-semibold mb-2">Résultats</h3>
+          <ul className="space-y-2">
+            {(search.data?.items || []).map((s:any)=>(
+              <li key={s.profileId} className="flex items-center justify-between">
+                <button className="text-blue-600 hover:underline" onClick={()=>setSelected(s)}>{s.lastName} {s.firstName} — {s.code}</button>
               </li>
             ))}
           </ul>
-        )}
-      </div>
-
-      <div className="space-y-2">
-        <h3 className="font-semibold">Créer une question</h3>
-        <QuestionEditor submitting={create.isPending} onSubmit={(val)=>create.mutate(val)} />
+        </section>
+        <section className="border rounded-2xl p-3">
+          <h3 className="font-semibold mb-2">Sections de {selected ? `${selected.lastName} ${selected.firstName}` : '—'}</h3>
+          {!selected ? <p className="opacity-70 text-sm">Sélectionnez un élève.</p> : (
+            <>
+              <ul className="space-y-1">
+                {(sec.data?.sections || []).map((r:any)=>(
+                  <li key={r.id} className="flex items-center justify-between">
+                    <span>{r.name}</span>
+                    <button className="text-red-600" onClick={()=>save.mutate({ add:[], remove:[r.id] })}>Retirer</button>
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-3">
+                <input className="border rounded px-2 py-1" placeholder="Ajouter sectionId" onKeyDown={(e:any)=>{ if(e.key==='Enter'){ save.mutate({ add:[e.currentTarget.value], remove:[] }); e.currentTarget.value=''; }}} />
+              </div>
+            </>
+          )}
+        </section>
       </div>
     </div>
   );
 }
-7) Student Pages
 tsx
 Copier le code
-// src/modules/assess/pages/StudentAvailablePage.tsx
-import { AvailableList } from '../components/AvailableList';
-export default function StudentAvailablePage(){ return <AvailableList/>; }
+// src/modules/staff/pages/StaffAttendanceEditPage.tsx
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { AttendanceAPI } from '@/modules/shared/api';
 
-// src/modules/assess/pages/AttemptPlayerPage.tsx
-import AttemptPlayer from '../components/AttemptPlayer';
-export default function AttemptPlayerPage(){ return <AttemptPlayer/>; }
-8) Routing additions
+export default function StaffAttendanceEditPage(){
+  const [sectionId, setSectionId] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0,10));
+  const q = useQuery({ queryKey: ['staff','att',sectionId,date], queryFn: ()=>AttendanceAPI.sectionForDate(sectionId, date), enabled: !!sectionId && !!date });
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (payload:any)=>AttendanceAPI.markSection(sectionId, payload),
+    onSuccess: (_,_vars)=> qc.invalidateQueries({ queryKey: ['staff','att',sectionId,date] })
+  });
+
+  const rows = new Map<string,{ studentProfileId: string; status: any; note?: string }>();
+  (q.data?.rows||[]).forEach((r:any)=>rows.set(r.studentProfileId, r));
+
+  function setStatus(id:string, s:any){ rows.set(id, { studentProfileId:id, status: s }); }
+  function submit(){ save.mutate({ date, marks: Array.from(rows.values()) }); }
+
+  return (
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Présences — Édition</h2>
+      <div className="flex gap-2">
+        <input className="border rounded px-2 py-1" placeholder="sectionId" value={sectionId} onChange={e=>setSectionId(e.target.value)} />
+        <input className="border rounded px-2 py-1" type="date" value={date} onChange={e=>setDate(e.target.value)} />
+        <button className="border rounded px-3" onClick={()=>submit()}>Enregistrer</button>
+      </div>
+      {q.isLoading ? <p>Chargement…</p> : (
+        <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
+          <thead><tr><th className="p-2 text-left">Élève</th><th className="p-2">Présent</th><th className="p-2">Absent</th><th className="p-2">Retard</th><th className="p-2">Justifié</th></tr></thead>
+          <tbody>
+            {(q.data?.rows||[]).map((r:any)=>(
+              <tr key={r.studentProfileId} className="border-t">
+                <td className="p-2">{r.studentName || r.studentProfileId.slice(0,8)}</td>
+                {['PRESENT','ABSENT','LATE','EXCUSED'].map(s=>(
+                  <td key={s} className="p-2 text-center">
+                    <input type="radio" name={`r-${r.studentProfileId}`} defaultChecked={r.status===s} onChange={()=>setStatus(r.studentProfileId, s)} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+Guard
+
 tsx
 Copier le code
-// src/app-routes.tsx (excerpt)
-import StudentAvailablePage from '@/modules/assess/pages/StudentAvailablePage';
-import AttemptPlayerPage from '@/modules/assess/pages/AttemptPlayerPage';
-import TeacherQuizListPage from '@/modules/assess/pages/TeacherQuizListPage';
-import TeacherQuizCreatePage from '@/modules/assess/pages/TeacherQuizCreatePage';
-import TeacherQuizEditPage from '@/modules/assess/pages/TeacherQuizEditPage';
-import TeacherSubmissionsPage from '@/modules/assess/pages/TeacherSubmissionsPage';
-import TeacherQuestionsPage from '@/modules/assess/pages/TeacherQuestionsPage';
-import { RequireRoles } from '@/modules/content/role-guard';
+{ path: '/staff', element: <RequireRoles roles={['STAFF','ADMIN']}><StaffHomePage/></RequireRoles> },
+{ path: '/staff/enrollment', element: <RequireRoles roles={['STAFF','ADMIN']}><StaffEnrollmentPage/></RequireRoles> },
+{ path: '/staff/guardians', element: <RequireRoles roles={['STAFF','ADMIN']}><div>TODO link/unlink UI</div></RequireRoles> },
+{ path: '/staff/attendance', element: <RequireRoles roles={['STAFF','ADMIN']}><StaffAttendanceEditPage/></RequireRoles> },
+{ path: '/staff/reports', element: <RequireRoles roles={['STAFF','ADMIN']}><div>TODO CSV exports</div></RequireRoles> },
+4) Navigation (role-aware)
+Show left menu items based on roles from useMe(); Admin sees everything.
 
-export const routes = [
-  // Student
-  { path: '/assess', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentAvailablePage/></RequireRoles> },
-  { path: '/assess/attempt/:attemptId', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><AttemptPlayerPage/></RequireRoles> },
+tsx
+Copier le code
+// src/components/RoleNav.tsx
+import { Link } from 'react-router-dom';
+import { useMe } from '@/modules/auth/hooks';
 
-  // Teacher
-  { path: '/teacher/assess', element: <RequireRoles roles={['TEACHER','ADMIN','STAFF']}><TeacherQuizListPage/></RequireRoles> },
-  { path: '/teacher/assess/questions', element: <RequireRoles roles={['TEACHER','ADMIN','STAFF']}><TeacherQuestionsPage/></RequireRoles> },
-  { path: '/teacher/assess/quizzes/new', element: <RequireRoles roles={['TEACHER','ADMIN','STAFF']}><TeacherQuizCreatePage/></RequireRoles> },
-  { path: '/teacher/assess/quizzes/:quizId/edit', element: <RequireRoles roles={['TEACHER','ADMIN','STAFF']}><TeacherQuizEditPage/></RequireRoles> },
-  { path: '/teacher/assess/quizzes/:quizId/submissions', element: <RequireRoles roles={['TEACHER','ADMIN','STAFF']}><TeacherSubmissionsPage/></RequireRoles> },
-];
-9) i18n (module strings)
+export function RoleNav(){
+  const { data } = useMe();
+  const roles = new Set(data?.user.roles || []);
+  return (
+    <nav className="space-y-1">
+      {roles.has('TEACHER') || roles.has('ADMIN') || roles.has('STAFF') ? (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Enseignant</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/teacher">Espace Enseignant</Link>
+        </>
+      ):null}
+      {roles.has('STUDENT') || roles.has('ADMIN') || roles.has('TEACHER') || roles.has('STAFF') ? (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Élève</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/student">Accueil élève</Link>
+        </>
+      ):null}
+      {roles.has('GUARDIAN') || roles.has('ADMIN') || roles.has('STAFF') ? (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Parent</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/guardian">Espace Parent</Link>
+        </>
+      ):null}
+      {roles.has('STAFF') || roles.has('ADMIN') ? (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Personnel</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/staff">Espace Personnel</Link>
+        </>
+      ):null}
+    </nav>
+  );
+}
+5) i18n Keys (merge into global dictionary)
 ts
 Copier le code
-// src/modules/assess/i18n.ts
-export const assessI18n = {
-  fr: { assess: {
-    available: 'Évaluations disponibles',
-    start: 'Commencer', submit: 'Soumettre', saving: 'Sauvegarde…',
-    questions: 'Questions', audience: 'Audience', open: 'Ouverture', close: 'Fermeture',
-    attempts: 'Tentatives', timeLimit: 'Durée', myQuizzes: 'Mes Quiz', new: 'Nouveau',
-  }},
-  en: { assess: {
-    available: 'Available assessments',
-    start: 'Start', submit: 'Submit', saving: 'Saving…',
-    questions: 'Questions', audience: 'Audience', open: 'Open', close: 'Close',
-    attempts: 'Attempts', timeLimit: 'Time limit', myQuizzes: 'My quizzes', new: 'New',
-  }},
-  ar: { assess: {
-    available: 'الاختبارات المتاحة',
-    start: 'ابدأ', submit: 'إرسال', saving: 'جاري الحفظ…',
-    questions: 'الأسئلة', audience: 'الجمهور', open: 'فتح', close: 'إغلاق',
-    attempts: 'محاولات', timeLimit: 'المدة', myQuizzes: 'اختباراتي', new: 'جديد',
-  }},
+// src/i18n/roles.ts
+export const rolesI18n = {
+  fr: {
+    common: { loading:'Chargement…', save:'Enregistrer', back:'Retour' },
+    teacher: { title:'Espace Enseignant', attendance:'Appel', note:'Publier une note', quiz:'Quiz' },
+    student: { title:'Accueil élève', notes:'Annonces', assess:'Évaluations', attendance:'Présences', timetable:'Emploi du temps' },
+    guardian: { title:'Espace Parent', children:'Mes enfants', attendance:'Présences' },
+    staff: { title:'Espace Personnel', enrollment:'Inscription', guardians:'Liens Parents', attendance:'Présences', reports:'Rapports' },
+  },
+  en: {
+    common: { loading:'Loading…', save:'Save', back:'Back' },
+    teacher: { title:'Teacher Workspace', attendance:'Attendance', note:'Post note', quiz:'Quiz' },
+    student: { title:'Student Home', notes:'Announcements', assess:'Assessments', attendance:'Attendance', timetable:'Timetable' },
+    guardian: { title:'Parent Portal', children:'My children', attendance:'Attendance' },
+    staff: { title:'Staff Workspace', enrollment:'Enrollment', guardians:'Guardian Links', attendance:'Attendance', reports:'Reports' },
+  },
+  ar: {
+    common: { loading:'جاري التحميل…', save:'حفظ', back:'رجوع' },
+    teacher: { title:'مساحة المعلم', attendance:'الغياب', note:'نشر ملاحظة', quiz:'اختبار' },
+    student: { title:'واجهة الطالب', notes:'الإعلانات', assess:'الاختبارات', attendance:'الحضور', timetable:'الجدول' },
+    guardian: { title:'واجهة ولي الأمر', children:'أطفالي', attendance:'الحضور' },
+    staff: { title:'واجهة الموظفين', enrollment:'التسجيل', guardians:'ربط الأولياء', attendance:'الحضور', reports:'تقارير' },
+  },
 };
-Ensure your layout toggles dir="rtl" when locale is ar.
+Ensure <html dir={isRTL(locale)?'rtl':'ltr'} lang={locale}>.
 
-10) Manual Test Plan
-Teacher:
+6) Accessibility & UX Notes
+Use semantic <button>, <label>, <input> and visible focus states.
 
-Create 1–2 questions (FR translation at minimum) via /teacher/assess/questions.
+For Arabic, test table visual order and alignment (use rtl: Tailwind utilities).
 
-Create a quiz (open/close window today, audience to a test class) via /teacher/assess/quizzes/new.
+Show server errors near action buttons; prefer toast for background failures.
 
-Publish it on the edit page.
+Disable “Change password” for non-admin users (per requirement).
 
-Student (enrolled in that class):
+7) Manual End-to-End Tests
+Teacher
 
-Open /assess → see the quiz with attempts remaining.
+Open /teacher, see today’s classes.
 
-Click Commencer → attempt opens with timer (if set).
+Take attendance in one section; refresh → persisted.
 
-Select answers; wait for Sauvegarde… to resolve (autosave).
+Publish a note to a class; confirm success.
 
-Click Soumettre → alert shows score; redirected to list.
+Student (enrolled in that section)
 
-Teacher: open Submissions page and verify the attempt is graded with score.
+/student/notes shows the new note; open and download attachment.
 
-11) Definition of Done (Client)
- Student: list available quizzes; start → attempt player → autosave → submit → score shown.
+/student/assess lists an open quiz; start, answer, submit → score shown.
 
- Timer shown when timeLimitSec exists; auto-submit at zero.
+/student/attendance shows recent marks.
 
- Teacher: question bank create (multilingual), quiz create/edit, set audience, schedule, publish, see submissions.
+Guardian (linked to the student)
 
- i18n integrated (fr default, ar RTL, en); Accept-Language sent to server.
+/guardian shows child; /guardian/attendance displays last 30 days.
 
- No correctness data leaked to the client before submit (player uses server-localized text only).
+/guardian/notes shows the note audience to class/grade.
 
- Errors surfaced; navigation guarded by roles.
+Staff
 
-12) Implement these also (Client)
-Render Markdown with a proper sanitizer and math support.
+/staff/enrollment search student → add/remove a section → verify in roster.
 
-Show per-question correctness & explanations after submission (needs server policy).
+/staff/attendance adjust a mark for a date; teacher/student views reflect change.
 
-Resume attempt after page reload (add /attempts/:id/play endpoint that rehydrates).
+8) Definition of Done (Client Multi-Role)
+ RBAC guards in place; Admin bypasses for QA.
 
-Keyboard shortcuts; accessibility labels for radios/checkboxes.
+ Teacher workspace operational (attendance, roster, notes, assessments).
 
-Teacher quiz list endpoint + filters by status/date.
+ Student portal operational (feed, note detail w/ attachments, timetable, assessments, attendance summary).
 
-Export submissions CSV; per-question analytics.
+ Guardian portal operational (children list, attendance per child, feed).
+
+ Staff workspace operational (enrollment screen, attendance edit; guardians & reports stubs ready).
+
+ All fetches send Accept-Language and render correctly in fr/en/ar; RTL applied for ar.
+
+ No password self-service surfaced for non-admin users.
+
+ Error states and loading states handled; minimal empty states included.
+
+9) Future Enhancements
+Offline cache/queue for Teacher attendance (Background sync).
+
+Global search (students/sections/users) with a thin API.
+
+CSV export pages (attendance, submissions) using client-side generation from API datasets.
+
+Rich Markdown rendering (sanitized) for notes and question text.
+
+Notification badges for unread notes and pending quizzes.
+
+“Switch Role” control for multi-role users (teacher+guardian).

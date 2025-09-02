@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { get, patch, post } from '@/lib/api';
+import { http } from '@/lib/http';
 import { downloadCSV } from '@/lib/utils';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -63,12 +63,12 @@ export function UsersList() {
 
   const { data, isLoading, error } = useQuery<UserRow[]>({
     queryKey: ['admin-users'],
-    queryFn: () => get<UserRow[]>('admin/users'),
+    queryFn: () => http<UserRow[]>('/admin/users'),
   });
 
   const toggleUserStatusMutation = useMutation({
     mutationFn: ({ userId, isActive }: { userId: string; isActive: boolean }) => 
-      patch(`admin/users/${userId}/status`, { isActive }),
+      http(`/admin/users/${userId}/status`, { method: 'PATCH', body: JSON.stringify({ isActive }) }),
     onSuccess: () => {
       toast.success('Statut utilisateur mis à jour');
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
@@ -79,7 +79,7 @@ export function UsersList() {
   });
 
   const lockUserMutation = useMutation({
-    mutationFn: (userId: string) => post(`admin/users/${userId}/lock`, {}),
+    mutationFn: (userId: string) => http(`/admin/users/${userId}/lock`, { method: 'POST', body: JSON.stringify({}) }),
     onSuccess: () => {
       toast.success('Utilisateur verrouillé');
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
@@ -90,7 +90,7 @@ export function UsersList() {
   });
 
   const unlockUserMutation = useMutation({
-    mutationFn: (userId: string) => post(`admin/users/${userId}/unlock`, {}),
+    mutationFn: (userId: string) => http(`/admin/users/${userId}/unlock`, { method: 'POST', body: JSON.stringify({}) }),
     onSuccess: () => {
       toast.success('Utilisateur déverrouillé');
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });

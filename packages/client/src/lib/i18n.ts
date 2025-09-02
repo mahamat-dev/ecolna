@@ -1,6 +1,10 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
+export type Locale = 'fr'|'en'|'ar';
+export function getLocale(): Locale { return (localStorage.getItem('locale') as Locale) || 'fr'; }
+export function isRTL(loc: Locale) { return loc === 'ar'; }
+
 const resources = {
   fr: {
     translation: {
@@ -114,6 +118,63 @@ const resources = {
         start: 'Start'
       },
       users: { title: 'Users' },
+    },
+  },
+  ar: {
+    translation: {
+      app: { title: 'إدارة إيكولنا' },
+      auth: {
+        signIn: 'تسجيل الدخول',
+        email: 'البريد الإلكتروني',
+        password: 'كلمة المرور',
+        submit: 'دخول',
+        logout: 'تسجيل الخروج',
+      },
+      common: {
+        loading: 'جاري التحميل...',
+        error: 'حدث خطأ',
+        search: 'بحث',
+        searchPlaceholder: 'اكتب للبحث عن المستخدمين، الفصول...',
+        noResults: 'لا توجد نتائج',
+        export: 'تصدير',
+        retry: 'إعادة المحاولة',
+        starting: 'بدء التشغيل...',
+        save: 'حفظ',
+        submit: 'إرسال'
+      },
+      menu: {
+        dashboard: 'لوحة التحكم',
+        profile: 'ملفي الشخصي',
+        users: 'المستخدمون',
+        stages: 'المراحل',
+        gradeLevels: 'المستويات',
+        yearsTerms: 'السنوات والفصول',
+        subjects: 'المواد',
+        sections: 'الفصول',
+        enrollment: 'التسجيل',
+        guardians: 'أولياء الأمور',
+        assignments: 'المهام',
+        attendance: 'الحضور',
+        takeAttendance: 'أخذ الحضور',
+        content: 'المحتوى',
+        notes: 'الملاحظات',
+        audit: 'السجل',
+        assess: 'التقييمات',
+        assessStudent: 'تقييماتي',
+        assessTeacher: 'التقييمات (المعلم)',
+        questionBank: 'بنك الأسئلة',
+        quizzes: 'الاختبارات',
+        submissions: 'المرسلات',
+      },
+      assess: {
+        noneAvailable: 'لا توجد اختبارات متاحة في الوقت الحالي.',
+        untitledQuiz: 'اختبار بدون عنوان',
+        noTimeLimit: 'لا يوجد حد زمني',
+        attemptsRemaining: 'محاولة متبقية',
+        preview: 'معاينة',
+        start: 'بدء'
+      },
+      users: { title: 'المستخدمون' },
     },
   },
 } as const;

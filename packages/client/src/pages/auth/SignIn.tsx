@@ -1,10 +1,10 @@
 import { useForm } from 'react-hook-form';
-import { post } from '@/lib/api';
+import { http } from '@/lib/http';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
 
-type FormValues = { email: string; password: string };
+type FormValues = { credential: string; password: string };
 
 export function SignIn() {
   const { register, handleSubmit, formState: { isSubmitting } } = useForm<FormValues>();
@@ -13,7 +13,20 @@ export function SignIn() {
 
   const onSubmit = async (values: FormValues) => {
     try {
-      await post('auth/login-email', values);
+      const isEmail = values.credential.includes('@');
+      
+      if (isEmail) {
+        await http('/auth/login-email', {
+          method: 'POST',
+          body: JSON.stringify({ email: values.credential, password: values.password })
+        });
+      } else {
+        await http('/auth/login-id', {
+          method: 'POST',
+          body: JSON.stringify({ loginId: values.credential, secret: values.password })
+        });
+      }
+      
       // Invalidate the 'me' query to refresh authentication state
       await queryClient.invalidateQueries({ queryKey: ['me'] });
       toast.success('Connecté');
@@ -28,8 +41,8 @@ export function SignIn() {
       <form onSubmit={handleSubmit(onSubmit)} className="w-full max-w-sm space-y-4">
         <h1 className="text-2xl font-semibold text-center">Se connecter</h1>
         <div className="space-y-2">
-          <label className="text-sm font-medium">Email</label>
-          <input className="w-full rounded-md border px-3 py-2" type="email" {...register('email', { required: true })} />
+          <label className="text-sm font-medium">Email ou Identifiant</label>
+          <input className="w-full rounded-md border px-3 py-2" type="text" placeholder="admin@example.com ou STU001" {...register('credential', { required: true })} />
           </div>
         <div className="space-y-2">
           <label className="text-sm font-medium">Mot de passe</label>

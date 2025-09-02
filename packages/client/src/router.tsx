@@ -27,6 +27,17 @@ import TeacherAssessHomePage from '@/modules/assess/pages/Teacher/HomePage';
 import QuizCreatePage from '@/modules/assess/pages/Teacher/QuizCreatePage';
 import SubmissionsPage from '@/modules/assess/pages/Teacher/SubmissionsPage';
 import QuestionBankPage from '@/modules/assess/pages/Teacher/QuestionBankPage';
+import StudentHomePage from '@/modules/student/pages/StudentHomePage';
+import StudentNotesPage from '@/modules/student/pages/StudentNotesPage';
+import StudentNoteDetailPage from '@/modules/student/pages/StudentNoteDetailPage';
+import StudentAttendancePage from '@/modules/student/pages/StudentAttendancePage';
+import StudentAssessPage from '@/modules/student/pages/StudentAssessPage';
+import GuardianHomePage from '@/modules/guardian/pages/GuardianHomePage';
+import GuardianAttendancePage from '@/modules/guardian/pages/GuardianAttendancePage';
+import StaffHomePage from '@/modules/staff/pages/StaffHomePage';
+import StaffEnrollmentPage from '@/modules/staff/pages/StaffEnrollmentPage';
+import StaffAttendanceEditPage from '@/modules/staff/pages/StaffAttendanceEditPage';
+import TeacherHomePage from '@/modules/teacher/pages/TeacherHomePage';
 
 const router = createBrowserRouter([
   { path: '/sign-in', element: <SignIn /> },
@@ -40,6 +51,88 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Dashboard /> },
       { path: 'profile', element: <Profile /> },
+      // Student portal routes
+      {
+        path: 'student',
+        element: (
+          <RoleGuard roles={["STUDENT", "ADMIN", "STAFF", "TEACHER"]}>
+            <StudentHomePage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'student/notes',
+        element: (
+          <RoleGuard roles={["STUDENT", "ADMIN", "STAFF", "TEACHER"]}>
+            <StudentNotesPage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'student/notes/:id',
+        element: (
+          <RoleGuard roles={["STUDENT", "ADMIN", "STAFF", "TEACHER"]}>
+            <StudentNoteDetailPage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'student/attendance',
+        element: (
+          <RoleGuard roles={["STUDENT", "ADMIN", "STAFF", "TEACHER"]}>
+            <StudentAttendancePage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'student/assess',
+        element: (
+          <RoleGuard roles={["STUDENT", "ADMIN", "STAFF", "TEACHER"]}>
+            <StudentAssessPage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'student/assess/attempt/:attemptId',
+        element: (
+          <RoleGuard roles={["STUDENT", "ADMIN", "STAFF", "TEACHER"]}>
+            <AttemptPage />
+          </RoleGuard>
+        ),
+      },
+      // Guardian portal routes
+      {
+        path: 'guardian',
+        element: (
+          <RoleGuard roles={["GUARDIAN", "ADMIN", "STAFF"]}>
+            <GuardianHomePage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'guardian/attendance',
+        element: (
+          <RoleGuard roles={["GUARDIAN", "ADMIN", "STAFF"]}>
+            <GuardianAttendancePage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'guardian/notes',
+        element: (
+          <RoleGuard roles={["GUARDIAN", "ADMIN", "STAFF"]}>
+            <StudentNotesPage />
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'guardian/notes/:id',
+        element: (
+          <RoleGuard roles={["GUARDIAN", "ADMIN", "STAFF"]}>
+            <StudentNoteDetailPage />
+          </RoleGuard>
+        ),
+      },
       {
         path: 'identity/users',
         element: (
@@ -120,6 +213,15 @@ const router = createBrowserRouter([
            element: (
              <RoleGuard roles={["ADMIN"]}>
                <Assignments />
+             </RoleGuard>
+           ),
+         },
+         // Teacher dashboard
+         {
+           path: 'teacher',
+           element: (
+             <RoleGuard roles={["ADMIN", "TEACHER"]}>
+               <TeacherHomePage />
              </RoleGuard>
            ),
          },
@@ -216,6 +318,31 @@ const router = createBrowserRouter([
              </RoleGuard>
            ),
          },
+         // Staff portal route (optional quick links)
+         {
+            path: 'staff',
+            element: (
+              <RoleGuard roles={["STAFF", "ADMIN"]}>
+                <StaffHomePage />
+              </RoleGuard>
+            ),
+          },
+          {
+            path: 'staff/enrollment',
+            element: (
+              <RoleGuard roles={["STAFF", "ADMIN"]}>
+                <StaffEnrollmentPage />
+              </RoleGuard>
+            ),
+          },
+          {
+            path: 'staff/attendance',
+            element: (
+              <RoleGuard roles={["STAFF", "ADMIN"]}>
+                <StaffAttendanceEditPage />
+              </RoleGuard>
+            ),
+          },
     ],
   },
 ]);
