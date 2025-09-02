@@ -19,6 +19,10 @@ const resources = {
         searchPlaceholder: 'Tapez pour rechercher des utilisateurs, classes...',
         noResults: 'Aucun résultat trouvé',
         export: 'Exporter',
+        retry: 'Réessayer',
+        starting: 'Démarrage...',
+        save: 'Enregistrer',
+        submit: 'Soumettre'
       },
       menu: {
         dashboard: 'Tableau de bord',
@@ -37,6 +41,20 @@ const resources = {
         content: 'Contenus',
         notes: 'Notes',
         audit: 'Historique',
+        assess: 'Évaluations',
+        assessStudent: 'Mes évaluations',
+        assessTeacher: 'Évaluations (enseignant)',
+        questionBank: 'Banque de questions',
+        quizzes: 'Quiz',
+        submissions: 'Soumissions',
+      },
+      assess: {
+        noneAvailable: 'Aucun quiz disponible pour le moment.',
+        untitledQuiz: 'Quiz sans titre',
+        noTimeLimit: 'Pas de limite de temps',
+        attemptsRemaining: 'tentative(s) restante(s)',
+        preview: 'Aperçu',
+        start: 'Commencer'
       },
       users: { title: 'Utilisateurs' },
     },
@@ -58,6 +76,10 @@ const resources = {
         searchPlaceholder: 'Type to search users, classes...',
         noResults: 'No results found',
         export: 'Export',
+        retry: 'Retry',
+        starting: 'Starting...',
+        save: 'Save',
+        submit: 'Submit'
       },
       menu: {
         dashboard: 'Dashboard',
@@ -76,6 +98,20 @@ const resources = {
         content: 'Content',
         notes: 'Notes',
         audit: 'Audit',
+        assess: 'Assessments',
+        assessStudent: 'My Assessments',
+        assessTeacher: 'Assessments (Teacher)',
+        questionBank: 'Question Bank',
+        quizzes: 'Quizzes',
+        submissions: 'Submissions',
+      },
+      assess: {
+        noneAvailable: 'No quizzes available at the moment.',
+        untitledQuiz: 'Untitled quiz',
+        noTimeLimit: 'No time limit',
+        attemptsRemaining: 'attempt(s) remaining',
+        preview: 'Preview',
+        start: 'Start'
       },
       users: { title: 'Users' },
     },

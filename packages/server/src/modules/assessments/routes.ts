@@ -582,4 +582,82 @@ router.post('/attempts/:id/submit', requireAuth, async (req, res) => {
   }
 });
 
+// Get attempt content for player
+router.get('/attempts/:id', requireAuth, async (req, res) => {
+  try {
+    const viewer = await viewerFromReq(req);
+    const attemptId = z.string().uuid().parse(req.params.id);
+    const locale = (typeof req.query.locale === 'string' ? req.query.locale : undefined) ?? 'fr';
+
+    const [att] = await db.select().from(quizAttempt).where(eq(quizAttempt.id, attemptId));
+    if (!att || att.studentProfileId !== viewer.profileId) return res.status(404).json({ error: 'Attempt not found' });
+
+    const aqRows = await db.select().from(attemptQuestion).where(eq(attemptQuestion.attemptId, attemptId)).orderBy(attemptQuestion.orderIndex);
+
+    // Preload answers map
+    const ansRows = await db.select().from(attemptAnswer).where(eq(attemptAnswer.attemptId, attemptId));
+    const answers: Record<string, string[]> = {};
+    for (const a of ansRows) {
+      answers[a.questionId as string] = (a.selectedOptionIds as unknown as string[]) ?? [];
+    }
+
+    const questions = [] as Array<{
+      questionId: string;
+      type: string;
+      prompt: string;
+      points: number;
+      options: Array<{ id: string; text: string }>;
+    }>;
+
+    for (const row of aqRows) {
+      const qId = row.questionId as string;
+      const [q] = await db.select().from(question).where(eq(question.id, qId));
+      if (!q) continue;
+      const [tr] = await db.select().from(questionTranslation).where(and(eq(questionTranslation.questionId, qId), eq(questionTranslation.locale, locale as any)));
+      const prompt = (tr?.stemMd as string) ?? '';
+
+      // Resolve option order
+      const orderIds = ((row.optionOrder as unknown as string[]) ?? []).filter(Boolean);
+      let opts = [] as Array<{ id: string; text: string }>;
+      if (orderIds.length) {
+        const raw = await db.select().from(questionOption).where(inArray(questionOption.id, orderIds as any));
+        // map translations
+        const texts = new Map<string, string>();
+        for (const o of raw) {
+          const [otr] = await db.select().from(questionOptionTranslation).where(and(eq(questionOptionTranslation.optionId, o.id), eq(questionOptionTranslation.locale, locale as any)));
+          texts.set(o.id, (otr?.text as string) ?? '');
+        }
+        // keep order
+        opts = orderIds.map(id => ({ id, text: texts.get(id) ?? '' }));
+      } else {
+        // fallback by DB order if no sealed order stored
+        const raw = await db.select().from(questionOption).where(eq(questionOption.questionId, qId));
+        opts = await Promise.all(raw.sort((a,b)=> (a.orderIndex ?? 0) - (b.orderIndex ?? 0)).map(async (o) => {
+          const [otr] = await db.select().from(questionOptionTranslation).where(and(eq(questionOptionTranslation.optionId, o.id), eq(questionOptionTranslation.locale, locale as any)));
+          return { id: o.id, text: (otr?.text as string) ?? '' };
+        }));
+      }
+
+      questions.push({
+        questionId: qId,
+        type: q.type as any,
+        prompt,
+        points: Number(row.points ?? 1),
+        options: opts,
+      });
+    }
+
+    res.json({
+      attemptId: att.id,
+      status: att.status,
+      timeLimitSec: att.timeLimitSec,
+      startedAt: att.startedAt,
+      questions,
+      answers,
+    });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message ?? 'Bad request' });
+  }
+});
+
 export default router;

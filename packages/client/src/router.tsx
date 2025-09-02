@@ -21,6 +21,12 @@ import NoteCreatePage from '@/modules/content/pages/NoteCreatePage';
 import NoteDetailPage from '@/modules/content/pages/NoteDetailPage';
 import { AuthGuard, RoleGuard } from '@/guards';
 import { AppShell } from '@/shell/AppShell';
+import AssessListPage from '@/modules/assess/pages/AssessListPage';
+import AttemptPage from '@/modules/assess/pages/AttemptPage';
+import TeacherAssessHomePage from '@/modules/assess/pages/Teacher/HomePage';
+import QuizCreatePage from '@/modules/assess/pages/Teacher/QuizCreatePage';
+import SubmissionsPage from '@/modules/assess/pages/Teacher/SubmissionsPage';
+import QuestionBankPage from '@/modules/assess/pages/Teacher/QuestionBankPage';
 
 const router = createBrowserRouter([
   { path: '/sign-in', element: <SignIn /> },
@@ -157,6 +163,56 @@ const router = createBrowserRouter([
            element: (
              <RoleGuard roles={["ADMIN"]}>
                <AuditTimeline />
+             </RoleGuard>
+           ),
+         },
+         // Assessments — Student
+         {
+           path: 'assess',
+           element: (
+             <RoleGuard roles={["STUDENT"]}>
+               <AssessListPage />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'assess/attempt/:attemptId',
+           element: (
+             <RoleGuard roles={["STUDENT"]}>
+               <AttemptPage />
+             </RoleGuard>
+           ),
+         },
+         // Assessments — Teacher/Admin
+         {
+           path: 'teacher/assess',
+           element: (
+             <RoleGuard roles={["ADMIN", "TEACHER"]}>
+               <TeacherAssessHomePage />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'teacher/assess/quizzes/new',
+           element: (
+             <RoleGuard roles={["ADMIN", "TEACHER"]}>
+               <QuizCreatePage />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'teacher/assess/quizzes/:quizId/submissions',
+           element: (
+             <RoleGuard roles={["ADMIN", "TEACHER"]}>
+               <SubmissionsPage />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'teacher/assess/questions',
+           element: (
+             <RoleGuard roles={["ADMIN", "TEACHER"]}>
+               <QuestionBankPage />
              </RoleGuard>
            ),
          },

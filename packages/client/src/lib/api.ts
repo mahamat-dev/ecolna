@@ -1,9 +1,13 @@
 import ky, { HTTPError } from 'ky';
+import { getCurrentLocale } from '@/lib/locale';
 
 export const api = ky.create({
   prefixUrl: '/api',
   credentials: 'include',
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept-Language': getCurrentLocale(),
+  },
 });
 
 async function normalizeError(err: unknown): Promise<never> {

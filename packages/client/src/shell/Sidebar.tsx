@@ -100,6 +100,15 @@ export function Sidebar() {
       ]
     },
     {
+      icon: <ClipboardListIcon />,
+      name: t('menu.assess'),
+      labelKey: 'menu.assess',
+      subItems: [
+        { name: t('menu.quizzes'), path: '/teacher/assess', labelKey: 'menu.quizzes' },
+        { name: t('menu.questionBank'), path: '/teacher/assess/questions', labelKey: 'menu.questionBank' }
+      ]
+    },
+    {
       icon: <HistoryIcon />,
       name: t('menu.audit'),
       labelKey: 'menu.audit',
@@ -148,7 +157,74 @@ export function Sidebar() {
     }
   ];
 
-  const navItems = roles.includes('ADMIN') ? adminNavItems : staffNavItems;
+  const teacherNavItems: NavItem[] = [
+    {
+      icon: <GridIcon />,
+      name: t('menu.dashboard'),
+      labelKey: 'menu.dashboard',
+      path: '/'
+    },
+    {
+      icon: <UserCircleIcon />,
+      name: t('menu.profile'),
+      labelKey: 'menu.profile',
+      path: '/profile'
+    },
+    {
+      icon: <ClipboardListIcon />,
+      name: t('menu.assessTeacher'),
+      labelKey: 'menu.assessTeacher',
+      subItems: [
+        { name: t('menu.quizzes'), path: '/teacher/assess', labelKey: 'menu.quizzes' },
+        { name: t('menu.questionBank'), path: '/teacher/assess/questions', labelKey: 'menu.questionBank' }
+      ]
+    },
+    {
+      icon: <FileTextIcon />,
+      name: t('menu.content'),
+      labelKey: 'menu.content',
+      subItems: [
+        { name: t('menu.notes'), path: '/content/notes', labelKey: 'menu.notes' }
+      ]
+    }
+  ];
+
+  const studentNavItems: NavItem[] = [
+    {
+      icon: <GridIcon />,
+      name: t('menu.dashboard'),
+      labelKey: 'menu.dashboard',
+      path: '/'
+    },
+    {
+      icon: <UserCircleIcon />,
+      name: t('menu.profile'),
+      labelKey: 'menu.profile',
+      path: '/profile'
+    },
+    {
+      icon: <ClipboardListIcon />,
+      name: t('menu.assessStudent'),
+      labelKey: 'menu.assessStudent',
+      path: '/assess'
+    },
+    {
+      icon: <FileTextIcon />,
+      name: t('menu.content'),
+      labelKey: 'menu.content',
+      subItems: [
+        { name: t('menu.notes'), path: '/content/notes', labelKey: 'menu.notes' }
+      ]
+    }
+  ];
+
+  const navItems = roles.includes('ADMIN')
+    ? adminNavItems
+    : roles.includes('TEACHER')
+      ? teacherNavItems
+      : roles.includes('STUDENT')
+        ? studentNavItems
+        : staffNavItems;
 
   const toggleSubmenu = (itemName: string) => {
     setOpenSubmenu(prev => prev === itemName ? null : itemName);
