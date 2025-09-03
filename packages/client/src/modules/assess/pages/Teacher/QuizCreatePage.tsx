@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useCreateQuiz, useQuestions } from '../../hooks';
 import type { CreateQuizDto, QuestionSummary } from '../../types';
+import { useQuery } from '@tanstack/react-query';
+import { AcademicsAPI } from '@/modules/shared/api';
+import { useMe } from '@/modules/auth/hooks';
 
 export default function QuizCreatePage() {
   const navigate = useNavigate();
@@ -20,6 +23,43 @@ export default function QuizCreatePage() {
   // Selection of questions
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [pointsById, setPointsById] = useState<Record<string, string>>({});
+
+  // User role check
+  const me = useMe();
+  const roles: string[] = me.data?.user?.roles ?? [];
+  const isTeacherOnly = roles.includes('TEACHER') && !roles.includes('ADMIN') && !roles.includes('STAFF');
+
+  // Audience builder (from assignments for teachers)
+  const { data: assignments } = useQuery({ queryKey: ['teaching','assignments','me'], queryFn: AcademicsAPI.mySectionsTaught });
+  type AudienceItem = { scope: 'SUBJECT'|'CLASS_SECTION'|'GRADE_LEVEL'|'ALL'; subjectId?: string; classSectionId?: string; gradeLevelId?: string };
+  type Assignment = { subjectId?: string; classSectionId?: string; classSectionName?: string; gradeLevelId?: string };
+  const [audience, setAudience] = useState<AudienceItem[]>([]);
+
+  const subjects = useMemo(() => {
+    const set = new Map<string, { id: string }>();
+    (assignments as Assignment[] ?? []).forEach((a: Assignment) => { if (a.subjectId) set.set(a.subjectId, { id: a.subjectId }); });
+    return Array.from(set.values());
+  }, [assignments]);
+  const sections = useMemo(() => {
+    const map = new Map<string, { id: string; name?: string|null }>();
+    (assignments as Assignment[] ?? []).forEach((a: Assignment) => { if (a.classSectionId) map.set(a.classSectionId, { id: a.classSectionId, name: a.classSectionName }); });
+    return Array.from(map.values());
+  }, [assignments]);
+  const grades = useMemo(() => {
+    const set = new Map<string, { id: string }>();
+    (assignments as Assignment[] ?? []).forEach((a: Assignment) => { if (a.gradeLevelId) set.set(a.gradeLevelId, { id: a.gradeLevelId }); });
+    return Array.from(set.values());
+  }, [assignments]);
+
+  const addAudience = (item: AudienceItem) => {
+    setAudience(prev => {
+      // prevent duplicates of same scope+id
+      const key = (x: AudienceItem) => `${x.scope}:${x.subjectId||x.classSectionId||x.gradeLevelId||''}`;
+      if (prev.some(p => key(p) === key(item))) return prev;
+      return [...prev, item];
+    });
+  };
+  const removeAudience = (idx: number) => setAudience(prev => prev.filter((_, i) => i !== idx));
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -40,8 +80,8 @@ export default function QuizCreatePage() {
       maxAttempts: maxAttempts || 1,
       shuffleQuestions,
       shuffleOptions,
-      // openAt/closeAt are not in client CreateQuizDto; server DTO supports, but client API omits for now
-      audience: [ { scope: 'ALL' } ],
+      // openAt/closeAt omitted in client for now
+      audience: audience.length ? audience : [ { scope: 'ALL' } ],
       questions: orderedSelected.map(({ id, orderIndex }) => ({
         questionId: id,
         orderIndex,
@@ -49,6 +89,7 @@ export default function QuizCreatePage() {
       })),
     };
 
+    if (isTeacherOnly && audience.length === 0) return; // enforce audience for teachers
     const res = await createQuiz.mutateAsync(payload);
     const newId = res?.id;
     if (newId) {
@@ -96,7 +137,57 @@ export default function QuizCreatePage() {
           </div>
           <div className="md:col-span-2">
             <h3 className="font-medium">Audience</h3>
-            <div className="text-sm text-gray-700">Scope: ALL (everyone) — more targeting coming soon.</div>
+            <div className="text-sm text-gray-700">Define who can see this quiz. Teachers should pick from their subjects/sections/grades.</div>
+            <div className="mt-2 grid gap-3 md:grid-cols-3">
+              <div className="space-y-2">
+                <div className="text-sm font-medium">By Subject</div>
+                <div className="space-y-2">
+                  {subjects.map(s => (
+                    <button key={s.id} className="text-sm underline" onClick={()=> addAudience({ scope: 'SUBJECT', subjectId: s.id })}>
+                      Add subject {s.id.slice(0,8)}
+                    </button>
+                  ))}
+                  {!subjects.length && <div className="text-xs text-gray-500">No subjects found</div>}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-sm font-medium">By Section</div>
+                <div className="space-y-2">
+                  {sections.map(s => (
+                    <button key={s.id} className="text-sm underline" onClick={()=> addAudience({ scope: 'CLASS_SECTION', classSectionId: s.id })}>
+                      Add section {s.name || s.id.slice(0,8)}
+                    </button>
+                  ))}
+                  {!sections.length && <div className="text-xs text-gray-500">No sections found</div>}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-sm font-medium">By Grade</div>
+                <div className="space-y-2">
+                  {grades.map(g => (
+                    <button key={g.id} className="text-sm underline" onClick={()=> addAudience({ scope: 'GRADE_LEVEL', gradeLevelId: g.id })}>
+                      Add grade {g.id.slice(0,8)}
+                    </button>
+                  ))}
+                  {!grades.length && <div className="text-xs text-gray-500">No grades found</div>}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3">
+              <div className="text-sm font-medium mb-1">Selected audience</div>
+              {!audience.length && <div className="text-xs text-gray-500">None — will default to ALL (if permitted)</div>}
+              <ul className="flex flex-wrap gap-2">
+                {audience.map((a, idx) => (
+                  <li key={idx} className="px-2 py-1 rounded-full border text-xs flex items-center gap-2">
+                    <span>{a.scope}</span>
+                    {a.subjectId && <span>{a.subjectId.slice(0,8)}</span>}
+                    {a.classSectionId && <span>{a.classSectionId.slice(0,8)}</span>}
+                    {a.gradeLevelId && <span>{a.gradeLevelId.slice(0,8)}</span>}
+                    <button onClick={()=> removeAudience(idx)} className="opacity-70 hover:opacity-100">×</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         </div>
       </div>
@@ -142,9 +233,14 @@ export default function QuizCreatePage() {
       </div>
 
       <div className="flex items-center gap-3">
-        <Button onClick={handleCreate} disabled={createQuiz.isPending || !title.trim() || orderedSelected.length === 0}>Create quiz</Button>
+        <Button onClick={handleCreate} disabled={createQuiz.isPending || !title.trim() || orderedSelected.length === 0 || (isTeacherOnly && audience.length === 0)}>Create quiz</Button>
         <div className="text-sm text-gray-500">{orderedSelected.length} question(s) selected</div>
       </div>
+      {isTeacherOnly && (
+        <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-3">
+          Teachers must target a specific audience (Subject/Section/Grade). "ALL" is not allowed.
+        </div>
+      )}
     </div>
   );
 }

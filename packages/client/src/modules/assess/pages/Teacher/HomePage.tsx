@@ -7,6 +7,9 @@ export default function TeacherAssessHomePage() {
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">{t('menu.assessTeacher')}</h1>
       <div className="grid gap-4 md:grid-cols-2">
+        <Link to="/teacher/assess/quizzes" className="rounded border p-4 hover:bg-gray-50">
+          {t('menu.quizzes')} — Manage
+        </Link>
         <Link to="/teacher/assess/quizzes/new" className="rounded border p-4 hover:bg-gray-50">
           {t('menu.quizzes')} — {t('common.create') ?? 'Create'}
         </Link>

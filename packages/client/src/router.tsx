@@ -27,6 +27,7 @@ import TeacherAssessHomePage from '@/modules/assess/pages/Teacher/HomePage';
 import QuizCreatePage from '@/modules/assess/pages/Teacher/QuizCreatePage';
 import SubmissionsPage from '@/modules/assess/pages/Teacher/SubmissionsPage';
 import QuestionBankPage from '@/modules/assess/pages/Teacher/QuestionBankPage';
+import QuizListPage from '@/modules/assess/pages/Teacher/QuizListPage';
 import StudentHomePage from '@/modules/student/pages/StudentHomePage';
 import StudentNotesPage from '@/modules/student/pages/StudentNotesPage';
 import StudentNoteDetailPage from '@/modules/student/pages/StudentNoteDetailPage';
@@ -38,6 +39,11 @@ import StaffHomePage from '@/modules/staff/pages/StaffHomePage';
 import StaffEnrollmentPage from '@/modules/staff/pages/StaffEnrollmentPage';
 import StaffAttendanceEditPage from '@/modules/staff/pages/StaffAttendanceEditPage';
 import TeacherHomePage from '@/modules/teacher/pages/TeacherHomePage';
+import { financeRoutes } from '@/modules/finance/router/routes.finance';
+import { disciplineRoutes } from '@/modules/discipline/router/routes.discipline';
+import InboxPage from '@/modules/messages/pages/InboxPage';
+import ComposePage from '@/modules/messages/pages/ComposePage';
+import MessageDetailPage from '@/modules/messages/pages/DetailPage';
 
 const router = createBrowserRouter([
   { path: '/sign-in', element: <SignIn /> },
@@ -50,6 +56,10 @@ const router = createBrowserRouter([
     ),
     children: [
       { index: true, element: <Dashboard /> },
+      // Finance Module
+      ...financeRoutes,
+      // Discipline Module
+      ...disciplineRoutes,
       { path: 'profile', element: <Profile /> },
       // Student portal routes
       {
@@ -259,15 +269,40 @@ const router = createBrowserRouter([
            path: 'content/notes/:id',
            element: <NoteDetailPage />,
          },
-         // Audit route
-         {
-           path: 'audit',
-           element: (
-             <RoleGuard roles={["ADMIN"]}>
-               <AuditTimeline />
-             </RoleGuard>
-           ),
-         },
+        // Audit route
+        {
+          path: 'audit',
+          element: (
+            <RoleGuard roles={["ADMIN"]}>
+              <AuditTimeline />
+            </RoleGuard>
+          ),
+        },
+        // Messaging
+        {
+          path: 'messages',
+          element: (
+            <RoleGuard roles={["ADMIN","STAFF","TEACHER","STUDENT","GUARDIAN"]}>
+              <InboxPage />
+            </RoleGuard>
+          ),
+        },
+        {
+          path: 'messages/compose',
+          element: (
+            <RoleGuard roles={["ADMIN","STAFF","TEACHER","STUDENT","GUARDIAN"]}>
+              <ComposePage />
+            </RoleGuard>
+          ),
+        },
+        {
+          path: 'messages/:id',
+          element: (
+            <RoleGuard roles={["ADMIN","STAFF","TEACHER","STUDENT","GUARDIAN"]}>
+              <MessageDetailPage />
+            </RoleGuard>
+          ),
+        },
          // Assessments — Student
          {
            path: 'assess',
@@ -299,6 +334,14 @@ const router = createBrowserRouter([
            element: (
              <RoleGuard roles={["ADMIN", "TEACHER"]}>
                <QuizCreatePage />
+             </RoleGuard>
+           ),
+         },
+         {
+           path: 'teacher/assess/quizzes',
+           element: (
+             <RoleGuard roles={["ADMIN", "TEACHER"]}>
+               <QuizListPage />
              </RoleGuard>
            ),
          },

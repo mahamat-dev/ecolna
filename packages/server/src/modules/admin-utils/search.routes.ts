@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAdmin } from '../../middlewares/rbac';
+import { requireStaffOrAdmin } from '../../middlewares/rbac';
 import { SearchQuery } from './dto';
 import { db } from '../../db/client';
 import { users, userRoles, profiles } from '../../db/schema/identity';
@@ -8,8 +8,7 @@ import { and, eq, ilike, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 export const searchRouter = Router();
-// If you want STAFF too: replace requireAdmin with requireStaffOrAdmin
-searchRouter.use(requireAdmin);
+searchRouter.use(requireStaffOrAdmin);
 
 searchRouter.get('/', async (req, res) => {
   try {

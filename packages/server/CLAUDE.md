@@ -1,939 +1,759 @@
-# CLAUDE.module-8-assessments-mcq.md
-**Module 8 — Assessments (MCQ / Quizzes & Exams)**  
-_Server: Express **5**, TypeScript, Drizzle ORM, Postgres, Bun • i18n-ready (fr default, ar, en)_
+# CLAUDE.module-11-discipline.md
+**Module 11 — Discipline**  
+_Server: Express **5**, TypeScript, Drizzle ORM, Postgres, Bun • i18n (fr default, ar, en) • Files via Module 7 (local storage) • Audit via Module 6_
 
-Create/manage a **question bank** (MCQ single/multiple, True/False), build **quizzes/exams** mapped to **subjects & class sections**, schedule **windows** with **time limits**, let **students** attempt within their audience, and **auto-grade** submissions. Includes multilingual stems/options, shuffling, attempts limit, and results for teachers/admin.
-
-> This file is complete: schema, DTOs, services, routes, RBAC, scoring, i18n notes, OpenAPI, tests, and DoD.  
-> It relies on prior modules: **M1** (users/profiles/roles), **M2** (grade_level, class_section, subject), **M3** (enrollment), **M4** (teaching_assignment), **M6** (audit_log).
+Track and resolve **disciplinary incidents**: record events, attach students (perpetrator/victim/witness), assign **actions** (warning, detention, suspension), manage **detention sessions**, store **attachments**, accumulate **demerit points**, and provide role-aware views for **teachers**, **staff/admin**, **students**, and **guardians**.
 
 ---
 
-## 0) Scope
+## 0) Scope & Dependencies
 
-### Roles
-- **ADMIN/STAFF**: manage everything.
-- **TEACHER**: manage questions/quizzes for **their subjects/sections** (per Module 4).
-- **STUDENT**: see available quizzes in audience & window; attempt and view results of own attempts.
-- **GUARDIAN**: (optional future) view results of linked students.
+### Depends on
+- **M1** identity: `profiles`, `user_roles`
+- **M2** academics: `class_section`, `grade_level`, `subject` (optional for context)
+- **M3** enrollment: `enrollment`, `guardian_student`
+- **M6** audit log writer
+- **M7** content/files: `file_object` (for attachments)
 
-### Features (MVP)
-- Question bank with multilingual **stem/explanation**, **options** (text only).
-- Question types: **MCQ_SINGLE**, **MCQ_MULTI**, **TRUE_FALSE**.
-- Quizzes with **open/close window**, **time limit**, **shuffle** questions/options, **maxAttempts**.
-- Audience targeting: **GRADE_LEVEL**, **CLASS_SECTION**, **SUBJECT**, **ALL**.
-- Attempts: server-side **order sealing** (per attempt), **auto-grading**, score out of max.
-- Teacher dashboards: list attempts, export CSV (server stub).
+### Outcomes
+- Tables:
+  - Enums: `discipline_status`, `discipline_role`, `discipline_action_type`, `discipline_visibility`
+  - `discipline_category`, `discipline_category_translation`
+  - `discipline_incident`, `discipline_incident_participant`
+  - `discipline_incident_attachment`
+  - `discipline_action`
+  - `detention_session`, `detention_session_enrollment`, `detention_session_attendance`
+- Endpoints:
+  - Categories CRUD
+  - Incidents: create/update/get/list/delete, add participants, add attachments, add actions, publish/visibility
+  - Detention sessions: create/list/enroll/attendance
+  - Student & guardian views; points summary
+
+RBAC (summary):  
+**Admin/Staff** — full. **Teacher** — create & view incidents for their sections’ students; add notes/actions for those incidents. **Student** — read own **published** outcomes. **Guardian** — read child’s **published** outcomes.
 
 ---
 
-## 1) DB Schema (Drizzle + SQL)
+## 1) Database Schema (Drizzle)
 
 ### 1.1 Enums
 ```ts
-// src/db/schema/assess.enums.ts
+// src/db/schema/discipline.enums.ts
 import { pgEnum } from "drizzle-orm/pg-core";
 
-export const questionType = pgEnum("question_type", ["MCQ_SINGLE","MCQ_MULTI","TRUE_FALSE"]);
-export const quizStatus = pgEnum("quiz_status", ["DRAFT","PUBLISHED","CLOSED"]);
-export const attemptStatus = pgEnum("attempt_status", ["CREATED","IN_PROGRESS","SUBMITTED","GRADED"]);
-export const quizAudienceScope = pgEnum("quiz_audience_scope", ["ALL","GRADE_LEVEL","CLASS_SECTION","SUBJECT"]);
+export const disciplineStatus = pgEnum("discipline_status", [
+  "OPEN","UNDER_REVIEW","RESOLVED","CANCELLED"
+]);
+
+export const disciplineRole = pgEnum("discipline_role", [
+  "PERPETRATOR","VICTIM","WITNESS"
+]);
+
+export const disciplineActionType = pgEnum("discipline_action_type", [
+  "WARNING","DETENTION","SUSPENSION_IN_SCHOOL","SUSPENSION_OUT_OF_SCHOOL","PARENT_MEETING","COMMUNITY_SERVICE"
+]);
+
+export const disciplineVisibility = pgEnum("discipline_visibility", [
+  // what is visible to student/guardian
+  "PRIVATE","STUDENT","GUARDIAN"
+]);
 1.2 Tables
 ts
 Copier le code
-// src/db/schema/assess.ts
+// src/db/schema/discipline.ts
 import {
-  pgTable, uuid, text, timestamp, boolean, integer, numeric, varchar, jsonb
+  pgTable, uuid, text, integer, boolean, timestamp, varchar, numeric
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { profiles } from "./identity";
-import { classSection, gradeLevel, subject } from "./academics";
-import { questionType, quizStatus, attemptStatus, quizAudienceScope } from "./assess.enums";
+import { classSection } from "./academics";
+import { fileObject } from "./content";
+import { disciplineStatus, disciplineRole, disciplineActionType, disciplineVisibility } from "./discipline.enums";
 
-/** Question bank */
-export const question = pgTable("question", {
+export const disciplineCategory = pgTable("discipline_category", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  type: questionType("type").notNull(),
-  subjectId: uuid("subject_id").references(() => subject.id, { onDelete: "set null" }), // optional
-  createdByProfileId: uuid("created_by_profile_id").notNull()
-    .references(() => profiles.id, { onDelete: "restrict" }),
-  isArchived: boolean("is_archived").notNull().default(false),
+  code: varchar("code", { length: 32 }).notNull().unique(), // e.g., "CHEATING", "BULLYING"
+  defaultPoints: integer("default_points").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
 
-export const questionTranslation = pgTable("question_translation", {
-  questionId: uuid("question_id").notNull().references(() => question.id, { onDelete: "cascade" }),
+export const disciplineCategoryTranslation = pgTable("discipline_category_translation", {
+  categoryId: uuid("category_id").notNull().references(() => disciplineCategory.id, { onDelete: "cascade" }),
   locale: varchar("locale", { length: 8 }).notNull(), // fr | en | ar
-  stemMd: text("stem_md").notNull(),            // problem statement
-  explanationMd: text("explanation_md"),       // shown after submit
-}, (t) => ({ pk: { primaryKey: [t.questionId, t.locale] } }));
+  name: text("name").notNull(),
+  description: text("description"),
+}, (t) => ({
+  pk: { primaryKey: [t.categoryId, t.locale] }
+}));
 
-export const questionOption = pgTable("question_option", {
+export const disciplineIncident = pgTable("discipline_incident", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  questionId: uuid("question_id").notNull().references(() => question.id, { onDelete: "cascade" }),
-  // correctness stored here; weight for partial credit on MCQ_MULTI
-  isCorrect: boolean("is_correct").notNull().default(false),
-  weight: numeric("weight", { precision: 6, scale: 3 }).default("1"), // used for MCQ_MULTI partial scoring
-  orderIndex: integer("order_index").notNull().default(0),
-});
-
-export const questionOptionTranslation = pgTable("question_option_translation", {
-  optionId: uuid("option_id").notNull().references(() => questionOption.id, { onDelete: "cascade" }),
-  locale: varchar("locale", { length: 8 }).notNull(),
-  text: text("text").notNull(),
-}, (t) => ({ pk: { primaryKey: [t.optionId, t.locale] } }));
-
-/** Quiz */
-export const quiz = pgTable("quiz", {
-  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  createdByProfileId: uuid("created_by_profile_id").notNull()
+  categoryId: uuid("category_id").references(() => disciplineCategory.id, { onDelete: "set null" }),
+  status: disciplineStatus("status").notNull().default("OPEN"),
+  visibility: disciplineVisibility("visibility").notNull().default("PRIVATE"),
+  summary: text("summary").notNull(),         // short text
+  details: text("details"),                   // long narrative
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  location: varchar("location", { length: 128 }),
+  reportedByProfileId: uuid("reported_by_profile_id").notNull()
     .references(() => profiles.id, { onDelete: "restrict" }),
-  subjectId: uuid("subject_id").references(() => subject.id, { onDelete: "set null" }),
-  status: quizStatus("status").notNull().default("DRAFT"),
-  timeLimitSec: integer("time_limit_sec"), // optional (null = no limit)
-  maxAttempts: integer("max_attempts").notNull().default(1),
-  shuffleQuestions: boolean("shuffle_questions").notNull().default(true),
-  shuffleOptions: boolean("shuffle_options").notNull().default(true),
-  openAt: timestamp("open_at", { withTimezone: true }),  // null = not open yet unless PUBLISHED?
-  closeAt: timestamp("close_at", { withTimezone: true }), // null = no close
+  classSectionId: uuid("class_section_id").references(() => classSection.id, { onDelete: "set null" }), // context
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 });
 
-export const quizTranslation = pgTable("quiz_translation", {
-  quizId: uuid("quiz_id").notNull().references(() => quiz.id, { onDelete: "cascade" }),
-  locale: varchar("locale", { length: 8 }).notNull(),
-  title: text("title").notNull(),
-  descriptionMd: text("description_md"),
-}, (t) => ({ pk: { primaryKey: [t.quizId, t.locale] } }));
+export const disciplineIncidentParticipant = pgTable("discipline_incident_participant", {
+  incidentId: uuid("incident_id").notNull().references(() => disciplineIncident.id, { onDelete: "cascade" }),
+  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
+  role: disciplineRole("role").notNull(),
+  note: text("note"),
+}, (t)=>({
+  pk: { primaryKey: [t.incidentId, t.profileId, t.role] }
+}));
 
-export const quizQuestion = pgTable("quiz_question", {
-  quizId: uuid("quiz_id").notNull().references(() => quiz.id, { onDelete: "cascade" }),
-  questionId: uuid("question_id").notNull().references(() => question.id, { onDelete: "restrict" }),
-  points: numeric("points", { precision: 6, scale: 2 }).notNull().default("1"),
-  orderIndex: integer("order_index").notNull().default(0),
-}, (t) => ({ pk: { primaryKey: [t.quizId, t.questionId] } }));
+export const disciplineIncidentAttachment = pgTable("discipline_incident_attachment", {
+  incidentId: uuid("incident_id").notNull().references(() => disciplineIncident.id, { onDelete: "cascade" }),
+  fileId: uuid("file_id").notNull().references(() => fileObject.id, { onDelete: "restrict" }),
+}, (t)=>({
+  pk: { primaryKey: [t.incidentId, t.fileId] }
+}));
 
-export const quizAudience = pgTable("quiz_audience", {
+export const disciplineAction = pgTable("discipline_action", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  quizId: uuid("quiz_id").notNull().references(() => quiz.id, { onDelete: "cascade" }),
-  scope: quizAudienceScope("scope").notNull(),
-  gradeLevelId: uuid("grade_level_id").references(() => gradeLevel.id, { onDelete: "set null" }),
-  classSectionId: uuid("class_section_id").references(() => classSection.id, { onDelete: "set null" }),
-  subjectId: uuid("subject_id").references(() => subject.id, { onDelete: "set null" }),
-});
-
-/** Attempts */
-export const quizAttempt = pgTable("quiz_attempt", {
-  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  quizId: uuid("quiz_id").notNull().references(() => quiz.id, { onDelete: "cascade" }),
-  studentProfileId: uuid("student_profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  status: attemptStatus("status").notNull().default("CREATED"),
-  startedAt: timestamp("started_at", { withTimezone: true }),
-  submittedAt: timestamp("submitted_at", { withTimezone: true }),
-  score: numeric("score", { precision: 8, scale: 2 }),
-  maxScore: numeric("max_score", { precision: 8, scale: 2 }),
-  timeLimitSec: integer("time_limit_sec"), // snapshot from quiz at start
-  seed: integer("seed"), // RNG seed used to fix order for this attempt
-  ip: varchar("ip", { length: 64 }),
-  userAgent: text("user_agent"),
+  incidentId: uuid("incident_id").notNull().references(() => disciplineIncident.id, { onDelete: "cascade" }),
+  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }), // target student
+  type: disciplineActionType("type").notNull(),
+  points: integer("points").notNull().default(0),
+  assignedByProfileId: uuid("assigned_by_profile_id").notNull().references(() => profiles.id, { onDelete: "restrict" }),
+  dueAt: timestamp("due_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  comment: text("comment"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-/** The sealed order of questions/options for an attempt */
-export const attemptQuestion = pgTable("attempt_question", {
-  attemptId: uuid("attempt_id").notNull().references(() => quizAttempt.id, { onDelete: "cascade" }),
-  questionId: uuid("question_id").notNull().references(() => question.id, { onDelete: "restrict" }),
-  orderIndex: integer("order_index").notNull(),
-  optionOrder: jsonb("option_order"), // array of option UUIDs in presented order
-  points: numeric("points", { precision: 6, scale: 2 }).notNull().default("1"),
-}, (t) => ({ pk: { primaryKey: [t.attemptId, t.questionId] } }));
+export const detentionSession = pgTable("detention_session", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  title: varchar("title", { length: 128 }).notNull(),       // e.g., "Vendredi 16h Détention"
+  dateTime: timestamp("date_time", { withTimezone: true }).notNull(),
+  durationMinutes: integer("duration_minutes").notNull().default(60),
+  room: varchar("room", { length: 64 }),
+  capacity: integer("capacity").notNull().default(30),
+  createdByProfileId: uuid("created_by_profile_id").notNull().references(() => profiles.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
-export const attemptAnswer = pgTable("attempt_answer", {
-  attemptId: uuid("attempt_id").notNull().references(() => quizAttempt.id, { onDelete: "cascade" }),
-  questionId: uuid("question_id").notNull().references(() => question.id, { onDelete: "cascade" }),
-  selectedOptionIds: jsonb("selected_option_ids").notNull().default(sql`'[]'::jsonb`), // array of UUIDs
-  isCorrect: boolean("is_correct"),
-  score: numeric("score", { precision: 6, scale: 2 }),
-  answeredAt: timestamp("answered_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({ pk: { primaryKey: [t.attemptId, t.questionId] } }));
-1.3 Index suggestions (SQL)
+export const detentionSessionEnrollment = pgTable("detention_session_enrollment", {
+  sessionId: uuid("session_id").notNull().references(() => detentionSession.id, { onDelete: "cascade" }),
+  actionId: uuid("action_id").notNull().references(() => disciplineAction.id, { onDelete: "cascade" }), // action type must be DETENTION
+  studentProfileId: uuid("student_profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
+}, (t)=>({
+  pk: { primaryKey: [t.sessionId, t.actionId, t.studentProfileId] }
+}));
+
+export const detentionSessionAttendance = pgTable("detention_session_attendance", {
+  sessionId: uuid("session_id").notNull().references(() => detentionSession.id, { onDelete: "cascade" }),
+  studentProfileId: uuid("student_profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
+  present: boolean("present").notNull().default(false),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t)=>({
+  pk: { primaryKey: [t.sessionId, t.studentProfileId] }
+}));
+1.3 Indexes (SQL)
 sql
 Copier le code
-CREATE INDEX IF NOT EXISTS idx_question_subject ON question(subject_id);
-CREATE INDEX IF NOT EXISTS idx_quiz_status_window ON quiz(status, open_at, close_at);
-CREATE INDEX IF NOT EXISTS idx_quiz_audience_quiz ON quiz_audience(quiz_id);
-CREATE INDEX IF NOT EXISTS idx_attempt_student ON quiz_attempt(student_profile_id, quiz_id);
-CREATE INDEX IF NOT EXISTS idx_attempt_status ON quiz_attempt(status);
+-- drizzle/<timestamp>_m11_discipline.sql
+CREATE INDEX IF NOT EXISTS idx_disc_incident_status ON discipline_incident(status, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disc_incident_reporter ON discipline_incident(reported_by_profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disc_participant_profile ON discipline_incident_participant(profile_id);
+CREATE INDEX IF NOT EXISTS idx_disc_action_profile ON discipline_action(profile_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_detention_datetime ON detention_session(date_time);
 2) DTOs (Zod)
 ts
 Copier le code
-// src/modules/assessments/dto.ts
+// src/modules/discipline/dto.ts
 import { z } from "zod";
 
-export const Locale = z.enum(["fr","en","ar"]);
-export const QuestionType = z.enum(["MCQ_SINGLE","MCQ_MULTI","TRUE_FALSE"]);
-
-export const UpsertQuestionDto = z.object({
-  type: QuestionType,
-  subjectId: z.string().uuid().nullable().optional(),
+export const CreateCategoryDto = z.object({
+  code: z.string().min(1).max(32),
+  defaultPoints: z.coerce.number().int().min(0).max(1000).default(0),
   translations: z.array(z.object({
-    locale: Locale, stemMd: z.string().min(1), explanationMd: z.string().optional().nullable(),
-  })).min(1),
-  options: z.array(z.object({
-    // ID optional for update
-    id: z.string().uuid().optional(),
-    isCorrect: z.boolean().default(false),
-    weight: z.number().min(0).max(1).default(1),
-    orderIndex: z.number().int().min(0).default(0),
-    translations: z.array(z.object({ locale: Locale, text: z.string().min(1) })).min(1),
-  })).min(2)
-    .refine((arr) => arr.some(o => o.isCorrect), "At least one correct option required"),
-});
-
-export const CreateQuizDto = z.object({
-  subjectId: z.string().uuid().nullable().optional(),
-  translations: z.array(z.object({ locale: Locale, title: z.string().min(1), descriptionMd: z.string().optional().nullable() })).min(1),
-  timeLimitSec: z.number().int().positive().optional().nullable(),
-  maxAttempts: z.number().int().min(1).max(10).default(1),
-  shuffleQuestions: z.boolean().default(true),
-  shuffleOptions: z.boolean().default(true),
-  openAt: z.coerce.date().optional().nullable(),
-  closeAt: z.coerce.date().optional().nullable(),
-  audience: z.array(z.object({
-    scope: z.enum(["ALL","GRADE_LEVEL","CLASS_SECTION","SUBJECT"]),
-    gradeLevelId: z.string().uuid().optional(),
-    classSectionId: z.string().uuid().optional(),
-    subjectId: z.string().uuid().optional(),
-  })).min(1),
-  questions: z.array(z.object({
-    questionId: z.string().uuid(),
-    points: z.number().min(0).default(1),
-    orderIndex: z.number().int().min(0).default(0),
+    locale: z.enum(["fr","en","ar"]),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000).optional(),
   })).min(1),
 });
 
-export const UpdateQuizDto = CreateQuizDto.partial();
+export const CreateIncidentDto = z.object({
+  categoryId: z.string().uuid().nullable().optional(),
+  summary: z.string().min(5).max(500),
+  details: z.string().max(10000).optional(),
+  occurredAt: z.coerce.date(),
+  location: z.string().max(128).optional(),
+  classSectionId: z.string().uuid().optional(),
+  participants: z.array(z.object({
+    profileId: z.string().uuid(),
+    role: z.enum(["PERPETRATOR","VICTIM","WITNESS"]),
+    note: z.string().max(1000).optional()
+  })).min(1),
+  attachments: z.array(z.string().uuid()).default([]), // file_object ids
+});
 
-export const PublishDto = z.object({ publish: z.boolean() });
+export const UpdateIncidentDto = z.object({
+  categoryId: z.string().uuid().nullable().optional(),
+  summary: z.string().min(5).max(500).optional(),
+  details: z.string().max(10000).optional(),
+  occurredAt: z.coerce.date().optional(),
+  location: z.string().max(128).optional(),
+  classSectionId: z.string().uuid().optional(),
+  status: z.enum(["OPEN","UNDER_REVIEW","RESOLVED","CANCELLED"]).optional(),
+  visibility: z.enum(["PRIVATE","STUDENT","GUARDIAN"]).optional(),
+});
 
-export const ListAvailableQuery = z.object({
-  now: z.coerce.date().optional(), // testing override
-  locale: Locale.optional(),
+export const AddActionDto = z.object({
+  profileId: z.string().uuid(), // student
+  type: z.enum(["WARNING","DETENTION","SUSPENSION_IN_SCHOOL","SUSPENSION_OUT_OF_SCHOOL","PARENT_MEETING","COMMUNITY_SERVICE"]),
+  points: z.coerce.number().int().min(0).max(1000).default(0),
+  dueAt: z.coerce.date().optional(),
+  comment: z.string().max(2000).optional(),
+});
+
+export const CompleteActionDto = z.object({
+  completed: z.boolean().default(true),
+  comment: z.string().max(2000).optional(),
+});
+
+export const CreateDetentionDto = z.object({
+  title: z.string().min(1).max(128),
+  dateTime: z.coerce.date(),
+  durationMinutes: z.coerce.number().int().min(15).max(240).default(60),
+  room: z.string().max(64).optional(),
+  capacity: z.coerce.number().int().min(1).max(300).default(30),
+});
+
+export const EnrollDetentionDto = z.object({
+  sessionId: z.string().uuid(),
+  actionId: z.string().uuid(),
+  studentProfileId: z.string().uuid(),
+});
+
+export const MarkAttendanceDto = z.object({
+  present: z.boolean(),
+});
+
+export const ListIncidentsQuery = z.object({
+  status: z.enum(["OPEN","UNDER_REVIEW","RESOLVED","CANCELLED"]).optional(),
+  studentProfileId: z.string().uuid().optional(),
+  myReported: z.enum(["true","false"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  cursor: z.string().optional(), // ISO by openAt desc
+  cursor: z.string().optional(), // ISO createdAt (desc)
 });
 
-export const StartAttemptDto = z.object({
-  quizId: z.string().uuid(),
+export const PublishDto = z.object({
+  visibility: z.enum(["PRIVATE","STUDENT","GUARDIAN"]),
 });
-
-export const SubmitAnswersDto = z.object({
-  answers: z.array(z.object({
-    questionId: z.string().uuid(),
-    selectedOptionIds: z.array(z.string().uuid()).min(0),
-  })).min(1)
-});
-
-export const FinishAttemptDto = z.object({}); // placeholder
-3) Permissions
-Question & Quiz CRUD: ADMIN/STAFF; TEACHER only if quiz.subjectId / question.subjectId belongs to a subject they teach or quiz audience includes sections they teach (Module 4 teaching_assignment).
-
-Publish/Unpublish: same as above; only DRAFT ↔ PUBLISHED (server sets CLOSED when manually closed or after closeAt? For MVP we keep status controlled via endpoint).
-
-Student availability: visible if:
-
-status=PUBLISHED, and now within [openAt, closeAt] if set, and
-
-student’s enrollments match any quiz_audience (ALL or matching grade_level / class_section / subject), and
-
-attempts used < maxAttempts.
-
-4) Services (core logic)
-4.1 Audience check
+3) Authorization Helpers
 ts
 Copier le code
-// src/modules/assessments/audience.ts
+// src/modules/discipline/authz.ts
 import { db } from "../../db/client";
-import { quizAudience, quiz } from "../../db/schema/assess";
+import { userRoles } from "../../db/schema/identity";
 import { enrollment } from "../../db/schema/enrollment";
-import { classSectionSubject } from "../../db/schema/academics";
-import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { teachingAssignment } from "../../db/schema/teaching";
+import { eq, inArray } from "drizzle-orm";
 
-export async function studentMatchesQuiz(studentProfileId: string, quizId: string) {
-  const aud = await db.select().from(quizAudience).where(eq(quizAudience.quizId, quizId));
-  if (!aud.length) return false;
-
-  if (aud.some(a => a.scope === "ALL")) return true;
-
-  const enrs = await db.select({
-    sectionId: enrollment.classSectionId,
-    gradeLevelId: enrollment.gradeLevelId
-  }).from(enrollment).where(eq(enrollment.studentProfileId, studentProfileId));
-
-  const sectionIds = new Set(enrs.map(e => e.sectionId));
-  const gradeIds = new Set(enrs.map(e => e.gradeLevelId));
-
-  // SUBJECT audience matches if student's sections include that subject
-  const subjAud = aud.filter(a => a.scope === "SUBJECT" && a.subjectId);
-  if (subjAud.length && sectionIds.size) {
-    const links = await db.select().from(classSectionSubject)
-      .where(inArray(classSectionSubject.classSectionId, [...sectionIds] as any));
-    if (links.some(l => subjAud.some(a => a.subjectId === l.subjectId))) return true;
-  }
-
-  if (aud.some(a => a.scope === "GRADE_LEVEL" && a.gradeLevelId && gradeIds.has(a.gradeLevelId))) return true;
-  if (aud.some(a => a.scope === "CLASS_SECTION" && a.classSectionId && sectionIds.has(a.classSectionId))) return true;
-
-  return false;
+export async function rolesOf(userId: string) {
+  const rows = await db.select().from(userRoles).where(eq(userRoles.userId, userId));
+  return rows.map(r => r.role);
 }
-4.2 Availability & attempts left
+
+/** Teacher can act on students they teach (any assigned section). */
+export async function teacherHasStudent(teacherProfileId: string, studentProfileId: string) {
+  const sts = await db.select().from(enrollment).where(eq(enrollment.studentProfileId, studentProfileId));
+  if (!sts.length) return false;
+  const assigns = await db.select().from(teachingAssignment).where(inArray(teachingAssignment.classSectionId, sts.map(s=>s.classSectionId)));
+  return assigns.some(a => a.teacherProfileId === teacherProfileId);
+}
+
+/** Is staff/admin? */
+export function isPrivileged(roles: string[]) {
+  return roles.includes("ADMIN") || roles.includes("STAFF");
+}
+4) Routes (Express 5)
 ts
 Copier le code
-// src/modules/assessments/availability.ts
-import { db } from "../../db/client";
-import { quiz, quizAttempt } from "../../db/schema/assess";
-import { and, eq, gt, gte, isNull, lt, lte, sql } from "drizzle-orm";
-
-export async function isQuizOpen(quizRow: typeof quiz.$inferSelect, now = new Date()) {
-  if (quizRow.status !== "PUBLISHED") return false;
-  if (quizRow.openAt && now < quizRow.openAt) return false;
-  if (quizRow.closeAt && now > quizRow.closeAt) return false;
-  return true;
-}
-
-export async function attemptsRemaining(quizId: string, studentProfileId: string, maxAttempts: number) {
-  const rows = await db.select().from(quizAttempt)
-    .where(and(eq(quizAttempt.quizId, quizId), eq(quizAttempt.studentProfileId, studentProfileId)));
-  const used = rows.filter(r => r.status === "SUBMITTED" || r.status === "GRADED").length;
-  return Math.max(0, maxAttempts - used);
-}
-4.3 Start attempt (seal order)
-ts
-Copier le code
-// src/modules/assessments/start-attempt.ts
-import { db } from "../../db/client";
-import { quiz, quizQuestion, quizAttempt, attemptQuestion, questionOption } from "../../db/schema/assess";
-import { eq } from "drizzle-orm";
-
-function mulberry32(seed: number) {
-  return function() { let t = seed += 0x6D2B79F5; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
-}
-function shuffle<T>(arr: T[], rnd: () => number) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-  return a;
-}
-
-export async function startAttempt(quizId: string, studentProfileId: string, meta: { ip?: string, ua?: string }) {
-  const [q] = await db.select().from(quiz).where(eq(quiz.id, quizId));
-  if (!q) throw new Error("QUIZ_NOT_FOUND");
-
-  const seed = Math.floor(Math.random() * 2**31);
-  const rnd = mulberry32(seed);
-
-  let qrows = await db.select().from(quizQuestion).where(eq(quizQuestion.quizId, quizId));
-  qrows = q.shuffleQuestions ? shuffle(qrows, rnd) : qrows.sort((a,b)=>a.orderIndex-b.orderIndex);
-
-  const [att] = await db.insert(quizAttempt).values({
-    quizId, studentProfileId, status: "IN_PROGRESS", startedAt: new Date(),
-    timeLimitSec: q.timeLimitSec ?? null, seed, ip: meta.ip ?? null, userAgent: meta.ua ?? null
-  }).returning();
-
-  for (const [i, qq] of qrows.entries()) {
-    const opts = await db.select().from(questionOption).where(eq(questionOption.questionId, qq.questionId));
-    const ordered = (q.shuffleOptions ? shuffle(opts, rnd) : opts.sort((a,b)=>a.orderIndex-b.orderIndex)).map(o => o.id);
-    await db.insert(attemptQuestion).values({
-      attemptId: att.id, questionId: qq.questionId, orderIndex: i, optionOrder: ordered as any, points: qq.points as any
-    });
-  }
-
-  return att;
-}
-4.4 Grade attempt
-ts
-Copier le code
-// src/modules/assessments/grade.ts
-import { db } from "../../db/client";
-import { attemptAnswer, attemptQuestion, question, questionOption, quizAttempt } from "../../db/schema/assess";
-import { and, eq, inArray } from "drizzle-orm";
-
-export async function gradeAttempt(attemptId: string) {
-  const aq = await db.select().from(attemptQuestion).where(eq(attemptQuestion.attemptId, attemptId));
-  let total = 0, max = 0;
-
-  for (const row of aq) {
-    max += Number(row.points);
-    const [ans] = await db.select().from(attemptAnswer)
-      .where(and(eq(attemptAnswer.attemptId, attemptId), eq(attemptAnswer.questionId, row.questionId)));
-    const [q] = await db.select().from(question).where(eq(question.id, row.questionId));
-    const opts = await db.select().from(questionOption).where(eq(questionOption.questionId, row.questionId));
-
-    let score = 0, correct = false;
-    const correctIds = new Set(opts.filter(o => o.isCorrect).map(o => o.id));
-    const sel = new Set((ans?.selectedOptionIds as any[] ?? []) as string[]);
-
-    if (q.type === "TRUE_FALSE" || q.type === "MCQ_SINGLE") {
-      correct = sel.size === 1 && correctIds.has([...sel][0]);
-      score = correct ? Number(row.points) : 0;
-    } else if (q.type === "MCQ_MULTI") {
-      // partial: sum of weights for correctly selected that are correct, but zero if any incorrect selected
-      const wrongSelected = [...sel].some(id => !correctIds.has(id));
-      if (!wrongSelected) {
-        const weights = opts.filter(o => o.isCorrect && sel.has(o.id)).reduce((sum, o) => sum + Number(o.weight ?? 1), 0);
-        const maxWeights = opts.filter(o => o.isCorrect).reduce((sum, o) => sum + Number(o.weight ?? 1), 0) || 1;
-        score = Number(row.points) * (weights / maxWeights);
-        correct = weights === maxWeights;
-      } else {
-        score = 0; correct = false;
-      }
-    }
-
-    if (ans) {
-      await db.update(attemptAnswer).set({ isCorrect: correct, score }).where(and(
-        eq(attemptAnswer.attemptId, attemptId), eq(attemptAnswer.questionId, row.questionId)
-      ));
-    } else {
-      // unanswered
-      await db.insert(attemptAnswer).values({
-        attemptId, questionId: row.questionId, selectedOptionIds: JSON.stringify([]) as any, isCorrect: false, score: 0,
-      });
-    }
-
-    total += score;
-  }
-
-  await db.update(quizAttempt).set({
-    status: "GRADED", submittedAt: new Date(), score: total, maxScore: max
-  }).where(eq(quizAttempt.id, attemptId));
-
-  return { score: total, maxScore: max };
-}
-5) Routes
-5.1 Questions (teachers/admin)
-ts
-Copier le code
-// src/modules/assessments/questions.routes.ts
+// src/modules/discipline/routes.ts
 import { Router } from "express";
+import { z } from "zod";
 import { db } from "../../db/client";
 import {
-  question, questionTranslation, questionOption, questionOptionTranslation
-} from "../../db/schema/assess";
-import { UpsertQuestionDto } from "./dto";
-import { requireAuth } from "../../middlewares/rbac";
+  disciplineCategory, disciplineCategoryTranslation, disciplineIncident, disciplineIncidentParticipant,
+  disciplineIncidentAttachment, disciplineAction, detentionSession, detentionSessionEnrollment, detentionSessionAttendance
+} from "../../db/schema/discipline";
+import { CreateCategoryDto, CreateIncidentDto, UpdateIncidentDto, AddActionDto, CompleteActionDto,
+  CreateDetentionDto, EnrollDetentionDto, MarkAttendanceDto, ListIncidentsQuery, PublishDto } from "./dto";
+import { requireAuth, requireRoles } from "../../middlewares/rbac";
 import { writeAudit, actorFromReq } from "../admin-utils/audit.service";
-import { and, eq, inArray } from "drizzle-orm";
-import { z } from "zod";
+import { and, desc, eq, inArray, lt } from "drizzle-orm";
+import { rolesOf, teacherHasStudent, isPrivileged } from "./authz";
+import { fileObject } from "../../db/schema/content";
 
-export const questionsRouter = Router();
-questionsRouter.use(requireAuth);
+export const disciplineRouter = Router();
+disciplineRouter.use(requireAuth);
 
-// Create
-questionsRouter.post("/", async (req, res, next) => {
-  try {
-    const dto = UpsertQuestionDto.parse(req.body);
-    const profileId = (req.session as any).profileId;
+/** --- Categories (Admin/Staff) --- */
+disciplineRouter.post("/discipline/categories", requireRoles(["ADMIN","STAFF"]), async (req,res,next)=>{
+  try{
+    const dto = CreateCategoryDto.parse(req.body);
+    const [cat] = await db.insert(disciplineCategory).values({
+      code: dto.code, defaultPoints: dto.defaultPoints
+    }).returning();
+    await db.insert(disciplineCategoryTranslation).values(dto.translations.map(t=>({
+      categoryId: cat.id, locale: t.locale, name: t.name, description: t.description ?? null
+    })));
+    await writeAudit({ action:"DISC_CAT_CREATE", entityType:"DISC_CAT", entityId: cat.id, summary:dto.code, actor:actorFromReq(req) });
+    res.status(201).json(cat);
+  }catch(e){ next(e); }
+});
 
-    const [q] = await db.insert(question).values({
-      type: dto.type, subjectId: dto.subjectId ?? null, createdByProfileId: profileId
+disciplineRouter.get("/discipline/categories", async (_req,res,next)=>{
+  try{
+    const rows = await db.select().from(disciplineCategory).orderBy(desc(disciplineCategory.createdAt));
+    res.json({ items: rows });
+  }catch(e){ next(e); }
+});
+
+/** --- Incidents --- */
+
+// Create (Staff/Admin, or Teacher for students they teach)
+disciplineRouter.post("/discipline/incidents", async (req:any,res,next)=>{
+  try{
+    const dto = CreateIncidentDto.parse(req.body);
+    const roles: string[] = await rolesOf(req.session.user.id);
+    // Teacher restriction: all PERPETRATOR/VIC/VIT participants must be in teacher's scope
+    if (!isPrivileged(roles) && roles.includes("TEACHER")) {
+      for (const p of dto.participants) {
+        if (p.role !== "WITNESS") {
+          const ok = await teacherHasStudent(req.session.profileId, p.profileId);
+          if (!ok) return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Student out of scope" } });
+        }
+      }
+    }
+    if (!(isPrivileged(roles) || roles.includes("TEACHER"))) {
+      return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Not allowed" } });
+    }
+
+    const [inc] = await db.insert(disciplineIncident).values({
+      categoryId: dto.categoryId ?? null,
+      summary: dto.summary,
+      details: dto.details ?? null,
+      occurredAt: dto.occurredAt,
+      location: dto.location ?? null,
+      classSectionId: dto.classSectionId ?? null,
+      reportedByProfileId: req.session.profileId
     }).returning();
 
-    await db.insert(questionTranslation).values(dto.translations.map(t => ({
-      questionId: q.id, locale: t.locale, stemMd: t.stemMd, explanationMd: t.explanationMd ?? null
+    await db.insert(disciplineIncidentParticipant).values(dto.participants.map(p=>({
+      incidentId: inc.id, profileId: p.profileId, role: p.role as any, note: p.note ?? null
     })));
 
-    for (const opt of dto.options) {
-      const [o] = await db.insert(questionOption).values({
-        questionId: q.id, isCorrect: opt.isCorrect, weight: opt.weight as any, orderIndex: opt.orderIndex
-      }).returning();
-      await db.insert(questionOptionTranslation).values(opt.translations.map(tr => ({
-        optionId: o.id, locale: tr.locale, text: tr.text
-      })));
+    if (dto.attachments?.length) {
+      // validate files exist
+      const files = await db.select().from(fileObject).where(inArray(fileObject.id, dto.attachments));
+      if (files.length !== dto.attachments.length) return res.status(400).json({ error:{ code:"BAD_FILE", message:"Some files missing" } });
+      await db.insert(disciplineIncidentAttachment).values(dto.attachments.map(fid => ({ incidentId: inc.id, fileId: fid })));
     }
 
-    await writeAudit({ action: "QUESTION_CREATE", entityType: "QUESTION", entityId: q.id, actor: actorFromReq(req) });
-    res.status(201).json(q);
-  } catch (e) { next(e); }
+    await writeAudit({ action:"DISC_INCIDENT_CREATE", entityType:"DISC_INCIDENT", entityId: inc.id, summary:dto.summary, actor:actorFromReq(req) });
+    res.status(201).json(inc);
+  }catch(e){ next(e); }
 });
 
-// Update
-questionsRouter.patch("/:id", async (req, res, next) => {
-  try {
+// Update / status / visibility (privileged or reporter)
+disciplineRouter.patch("/discipline/incidents/:id", async (req:any,res,next)=>{
+  try{
     const id = z.string().uuid().parse(req.params.id);
-    const dto = UpsertQuestionDto.partial().parse(req.body);
+    const dto = UpdateIncidentDto.parse(req.body);
+    const [inc] = await db.select().from(disciplineIncident).where(eq(disciplineIncident.id, id));
+    if (!inc) return res.status(404).json({ error:{ code:"NOT_FOUND", message:"Incident not found" } });
+    const roles: string[] = await rolesOf(req.session.user.id);
+    const canEdit = isPrivileged(roles) || inc.reportedByProfileId === req.session.profileId;
+    if (!canEdit) return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Not allowed" } });
 
-    if (dto.type || dto.subjectId !== undefined) {
-      await db.update(question).set({
-        type: dto.type as any, subjectId: dto.subjectId ?? null, updatedAt: new Date()
-      }).where(eq(question.id, id));
-    }
-    if (dto.translations) {
-      for (const t of dto.translations) {
-        await db.insert(questionTranslation).values({ questionId: id, locale: t.locale, stemMd: t.stemMd, explanationMd: t.explanationMd ?? null })
-          .onConflictDoUpdate({ target: [questionTranslation.questionId, questionTranslation.locale],
-            set: { stemMd: t.stemMd, explanationMd: t.explanationMd ?? null } });
-      }
-    }
-    if (dto.options) {
-      // simple approach: delete & reinsert all options for this question
-      const opts = await db.select().from(questionOption).where(eq(questionOption.questionId, id));
-      if (opts.length) {
-        const optIds = opts.map(o => o.id);
-        await db.delete(questionOptionTranslation).where(inArray(questionOptionTranslation.optionId, optIds));
-        await db.delete(questionOption).where(eq(questionOption.questionId, id));
-      }
-      for (const opt of dto.options) {
-        const [o] = await db.insert(questionOption).values({
-          questionId: id, isCorrect: opt.isCorrect ?? false, weight: opt.weight as any ?? 1, orderIndex: opt.orderIndex ?? 0
-        }).returning();
-        await db.insert(questionOptionTranslation).values(opt.translations.map(tr => ({
-          optionId: o.id, locale: tr.locale, text: tr.text
-        })));
-      }
-    }
+    const [upd] = await db.update(disciplineIncident).set({
+      categoryId: dto.categoryId ?? inc.categoryId,
+      summary: dto.summary ?? inc.summary,
+      details: dto.details ?? inc.details,
+      occurredAt: dto.occurredAt ?? inc.occurredAt,
+      location: dto.location ?? inc.location,
+      classSectionId: dto.classSectionId ?? inc.classSectionId,
+      status: dto.status ?? inc.status,
+      visibility: dto.visibility ?? inc.visibility,
+      updatedAt: new Date(),
+      resolvedAt: (dto.status === "RESOLVED") ? new Date() : inc.resolvedAt
+    }).where(eq(disciplineIncident.id, id)).returning();
 
-    await writeAudit({ action: "QUESTION_UPDATE", entityType: "QUESTION", entityId: id, actor: actorFromReq(req) });
-    res.json({ ok: true });
-  } catch (e) { next(e); }
+    await writeAudit({ action:"DISC_INCIDENT_UPDATE", entityType:"DISC_INCIDENT", entityId: id, summary:"Incident updated", actor:actorFromReq(req) });
+    res.json(upd);
+  }catch(e){ next(e); }
 });
 
-// List (by subject or creator)
-questionsRouter.get("/", async (req, res, next) => {
-  try {
-    const subjectId = req.query.subjectId as string | undefined;
-    const creatorId = req.query.createdByProfileId as string | undefined;
-    const rows = await db.query.question.findMany({
-      where: (subjectId || creatorId) ? (fields, ops) => ops.and(
-        subjectId ? ops.eq(fields.subjectId, subjectId) : undefined as any,
-        creatorId ? ops.eq(fields.createdByProfileId, creatorId) : undefined as any
-      ) : undefined
-    });
-    res.json(rows);
-  } catch (e) { next(e); }
-});
-5.2 Quizzes
-ts
-Copier le code
-// src/modules/assessments/quizzes.routes.ts
-import { Router } from "express";
-import { db } from "../../db/client";
-import {
-  quiz, quizTranslation, quizAudience, quizQuestion
-} from "../../db/schema/assess";
-import { CreateQuizDto, UpdateQuizDto, PublishDto, ListAvailableQuery } from "./dto";
-import { requireAuth } from "../../middlewares/rbac";
-import { writeAudit, actorFromReq } from "../admin-utils/audit.service";
-import { and, desc, eq, lt } from "drizzle-orm";
-import { z } from "zod";
-import { isQuizOpen, attemptsRemaining } from "./availability";
-import { studentMatchesQuiz } from "./audience";
+// Add an action for a student (Staff/Admin; Teacher allowed for their students)
+disciplineRouter.post("/discipline/incidents/:id/actions", async (req:any,res,next)=>{
+  try{
+    const id = z.string().uuid().parse(req.params.id);
+    const dto = AddActionDto.parse(req.body);
+    const [inc] = await db.select().from(disciplineIncident).where(eq(disciplineIncident.id, id));
+    if (!inc) return res.status(404).json({ error:{ code:"NOT_FOUND", message:"Incident not found" } });
 
-export const quizzesRouter = Router();
-quizzesRouter.use(requireAuth);
+    const roles: string[] = await rolesOf(req.session.user.id);
+    if (!(isPrivileged(roles) || (roles.includes("TEACHER") && await teacherHasStudent(req.session.profileId, dto.profileId)))) {
+      return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Not allowed" } });
+    }
 
-// Create
-quizzesRouter.post("/", async (req, res, next) => {
-  try {
-    const dto = CreateQuizDto.parse(req.body);
-    const profileId = (req.session as any).profileId;
-
-    const [q] = await db.insert(quiz).values({
-      createdByProfileId: profileId,
-      subjectId: dto.subjectId ?? null,
-      timeLimitSec: dto.timeLimitSec ?? null,
-      maxAttempts: dto.maxAttempts,
-      shuffleQuestions: dto.shuffleQuestions,
-      shuffleOptions: dto.shuffleOptions,
-      openAt: dto.openAt ?? null,
-      closeAt: dto.closeAt ?? null,
+    const [act] = await db.insert(disciplineAction).values({
+      incidentId: id,
+      profileId: dto.profileId,
+      type: dto.type as any,
+      points: dto.points,
+      assignedByProfileId: req.session.profileId,
+      dueAt: dto.dueAt ?? null,
+      comment: dto.comment ?? null
     }).returning();
 
-    await db.insert(quizTranslation).values(dto.translations.map(t => ({
-      quizId: q.id, locale: t.locale, title: t.title, descriptionMd: t.descriptionMd ?? null
-    })));
-
-    await db.insert(quizAudience).values(dto.audience.map(a => ({
-      quizId: q.id, scope: a.scope as any, gradeLevelId: a.gradeLevelId ?? null,
-      classSectionId: a.classSectionId ?? null, subjectId: a.subjectId ?? null
-    })));
-
-    await db.insert(quizQuestion).values(dto.questions.map(x => ({
-      quizId: q.id, questionId: x.questionId, points: x.points as any, orderIndex: x.orderIndex
-    })));
-
-    await writeAudit({ action: "QUIZ_CREATE", entityType: "QUIZ", entityId: q.id, actor: actorFromReq(req) });
-    res.status(201).json(q);
-  } catch (e) { next(e); }
+    await writeAudit({ action:"DISC_ACTION_ASSIGN", entityType:"DISC_ACTION", entityId: act.id, summary:`${dto.type} +${dto.points}`, actor:actorFromReq(req) });
+    res.status(201).json(act);
+  }catch(e){ next(e); }
 });
 
-// Update
-quizzesRouter.patch("/:id", async (req, res, next) => {
-  try {
-    const id = z.string().uuid().parse(req.params.id);
-    const dto = UpdateQuizDto.parse(req.body);
-
-    if (dto.subjectId !== undefined || dto.timeLimitSec !== undefined || dto.maxAttempts !== undefined ||
-        dto.shuffleQuestions !== undefined || dto.shuffleOptions !== undefined ||
-        dto.openAt !== undefined || dto.closeAt !== undefined) {
-      await db.update(quiz).set({
-        subjectId: dto.subjectId ?? null,
-        timeLimitSec: dto.timeLimitSec ?? null,
-        maxAttempts: dto.maxAttempts ?? undefined,
-        shuffleQuestions: dto.shuffleQuestions ?? undefined,
-        shuffleOptions: dto.shuffleOptions ?? undefined,
-        openAt: dto.openAt ?? null,
-        closeAt: dto.closeAt ?? null,
-        updatedAt: new Date()
-      }).where(eq(quiz.id, id));
-    }
-
-    if (dto.translations) {
-      for (const t of dto.translations) {
-        await db.insert(quizTranslation).values({ quizId: id, locale: t.locale, title: t.title, descriptionMd: t.descriptionMd ?? null })
-          .onConflictDoUpdate({ target: [quizTranslation.quizId, quizTranslation.locale],
-            set: { title: t.title, descriptionMd: t.descriptionMd ?? null }});
-      }
-    }
-
-    if (dto.audience) {
-      await db.delete(quizAudience).where(eq(quizAudience.quizId, id));
-      await db.insert(quizAudience).values(dto.audience.map(a => ({
-        quizId: id, scope: a.scope as any, gradeLevelId: a.gradeLevelId ?? null,
-        classSectionId: a.classSectionId ?? null, subjectId: a.subjectId ?? null
-      })));
-    }
-
-    if (dto.questions) {
-      await db.delete(quizQuestion).where(eq(quizQuestion.quizId, id));
-      await db.insert(quizQuestion).values(dto.questions.map(x => ({
-        quizId: id, questionId: x.questionId, points: x.points as any, orderIndex: x.orderIndex
-      })));
-    }
-
-    await writeAudit({ action: "QUIZ_UPDATE", entityType: "QUIZ", entityId: id, actor: actorFromReq(req) });
-    res.json({ ok: true });
-  } catch (e) { next(e); }
+// Complete/undo an action
+disciplineRouter.post("/discipline/actions/:actionId/complete", async (req:any,res,next)=>{
+  try{
+    const actionId = z.string().uuid().parse(req.params.actionId);
+    const { completed, comment } = CompleteActionDto.parse(req.body);
+    const [act] = await db.update(disciplineAction).set({
+      completedAt: completed ? new Date() : null,
+      comment: comment ?? undefined
+    }).where(eq(disciplineAction.id, actionId)).returning();
+    if (!act) return res.status(404).json({ error:{ code:"NOT_FOUND", message:"Action not found" } });
+    await writeAudit({ action: completed ? "DISC_ACTION_COMPLETE":"DISC_ACTION_REOPEN", entityType:"DISC_ACTION", entityId: actionId, summary:"", actor:actorFromReq(req) });
+    res.json(act);
+  }catch(e){ next(e); }
 });
 
-// Publish/Unpublish
-quizzesRouter.post("/:id/publish", async (req, res, next) => {
-  try {
+// Publish visibility
+disciplineRouter.post("/discipline/incidents/:id/publish", requireRoles(["ADMIN","STAFF"]), async (req,res,next)=>{
+  try{
     const id = z.string().uuid().parse(req.params.id);
-    const { publish } = PublishDto.parse(req.body);
-    const [row] = await db.update(quiz).set({
-      status: publish ? "PUBLISHED" : "DRAFT", updatedAt: new Date()
-    }).where(eq(quiz.id, id)).returning();
-
-    await writeAudit({ action: publish ? "QUIZ_PUBLISH" : "QUIZ_UNPUBLISH", entityType: "QUIZ", entityId: id, actor: actorFromReq(req) });
+    const { visibility } = PublishDto.parse(req.body);
+    const [row] = await db.update(disciplineIncident).set({ visibility, updatedAt: new Date() }).where(eq(disciplineIncident.id, id)).returning();
+    await writeAudit({ action:"DISC_INCIDENT_PUBLISH", entityType:"DISC_INCIDENT", entityId:id, summary:`visibility=${visibility}`, actor:actorFromReq(req) });
     res.json(row);
-  } catch (e) { next(e); }
+  }catch(e){ next(e); }
 });
 
-// Student: list available
-quizzesRouter.get("/available", async (req, res, next) => {
-  try {
-    const q = ListAvailableQuery.parse(req.query);
-    const now = q.now ?? new Date();
-    const profileId = (req.session as any).profileId;
-
-    const rows = await db.select().from(quiz)
-      .where(eq(quiz.status, "PUBLISHED"))
-      .orderBy(desc(quiz.openAt))
-      .limit(q.limit); // simple page by openAt desc
-    const items = [];
-    for (const row of rows) {
-      if (!(await isQuizOpen(row, now))) continue;
-      const ok = await studentMatchesQuiz(profileId, row.id);
-      if (!ok) continue;
-      const remain = await attemptsRemaining(row.id, profileId, row.maxAttempts);
-      if (remain <= 0) continue;
-      items.push({ id: row.id, openAt: row.openAt, closeAt: row.closeAt, timeLimitSec: row.timeLimitSec, maxAttempts: row.maxAttempts, attemptsRemaining: remain });
-      if (items.length >= q.limit) break;
-    }
-    res.json({ items, nextCursor: null });
-  } catch (e) { next(e); }
-});
-5.3 Attempts
-ts
-Copier le code
-// src/modules/assessments/attempts.routes.ts
-import { Router } from "express";
-import { StartAttemptDto, SubmitAnswersDto, FinishAttemptDto } from "./dto";
-import { db } from "../../db/client";
-import { quiz, quizAttempt, attemptQuestion, attemptAnswer, question, questionOption, questionTranslation, questionOptionTranslation } from "../../db/schema/assess";
-import { isQuizOpen, attemptsRemaining } from "./availability";
-import { studentMatchesQuiz } from "./audience";
-import { startAttempt } from "./start-attempt";
-import { gradeAttempt } from "./grade";
-import { eq, and, inArray } from "drizzle-orm";
-import { z } from "zod";
-import { requireAuth } from "../../middlewares/rbac";
-import { writeAudit, actorFromReq } from "../admin-utils/audit.service";
-
-export const attemptsRouter = Router();
-attemptsRouter.use(requireAuth);
-
-// Start
-attemptsRouter.post("/start", async (req, res, next) => {
-  try {
-    const { quizId } = StartAttemptDto.parse(req.body);
-    const profileId = (req.session as any).profileId;
-    const [q] = await db.select().from(quiz).where(eq(quiz.id, quizId));
-    if (!q) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Quiz not found" } });
-
-    if (!(await isQuizOpen(q))) return res.status(403).json({ error: { code: "QUIZ_CLOSED", message: "Quiz not open" } });
-    if (!(await studentMatchesQuiz(profileId, quizId))) return res.status(403).json({ error: { code: "NOT_ALLOWED", message: "Not in audience" } });
-    if ((await attemptsRemaining(quizId, profileId, q.maxAttempts)) <= 0) return res.status(403).json({ error: { code: "NO_ATTEMPTS", message: "No attempts left" } });
-
-    const ip = req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || undefined;
-    const ua = req.headers["user-agent"] as string | undefined;
-    const att = await startAttempt(quizId, profileId, { ip, ua });
-
-    // build payload: ordered questions with option text (without correctness)
-    const aq = await db.select().from(attemptQuestion).where(eq(attemptQuestion.attemptId, att.id));
-    const locale = (req as any).locale || "fr";
-    const questions = [];
-    for (const row of aq.sort((a,b)=>a.orderIndex-b.orderIndex)) {
-      const [tr] = await db.select().from(questionTranslation)
-        .where(and(eq(questionTranslation.questionId, row.questionId), eq(questionTranslation.locale, locale)));
-      const opts = await db.select().from(questionOption).where(eq(questionOption.questionId, row.questionId));
-      const map = new Map<string, string>();
-      for (const opt of opts) {
-        const [otr] = await db.select().from(questionOptionTranslation)
-          .where(and(eq(questionOptionTranslation.optionId, opt.id), eq(questionOptionTranslation.locale, locale)));
-        map.set(opt.id, otr?.text ?? "(…)");
-      }
-      questions.push({
-        questionId: row.questionId,
-        stemMd: tr?.stemMd ?? "(no translation)",
-        optionOrder: (row.optionOrder as any[] ?? []).map(id => ({ id, text: map.get(id as string) ?? "(…)" })),
-        points: row.points
-      });
-    }
-
-    await writeAudit({ action: "QUIZ_ATTEMPT_START", entityType: "QUIZ_ATTEMPT", entityId: att.id, actor: actorFromReq(req) });
-    res.status(201).json({ attemptId: att.id, quizId: att.quizId, timeLimitSec: att.timeLimitSec, questions });
-  } catch (e) { next(e); }
-});
-
-// Save answers (can be called multiple times)
-attemptsRouter.post("/:id/answers", async (req, res, next) => {
-  try {
-    const attemptId = z.string().uuid().parse(req.params.id);
-    const dto = SubmitAnswersDto.parse(req.body);
-    const profileId = (req.session as any).profileId;
-
-    const [att] = await db.select().from(quizAttempt).where(eq(quizAttempt.id, attemptId));
-    if (!att || att.studentProfileId !== profileId) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Attempt not found" } });
-    if (att.status !== "IN_PROGRESS") return res.status(400).json({ error: { code: "STATE", message: "Attempt not in progress" } });
-
-    for (const a of dto.answers) {
-      await db.insert(attemptAnswer).values({
-        attemptId, questionId: a.questionId, selectedOptionIds: JSON.stringify(a.selectedOptionIds) as any
-      }).onConflictDoUpdate({
-        target: [attemptAnswer.attemptId, attemptAnswer.questionId],
-        set: { selectedOptionIds: JSON.stringify(a.selectedOptionIds) as any, answeredAt: new Date() }
-      });
-    }
-
-    res.json({ ok: true });
-  } catch (e) { next(e); }
-});
-
-// Submit/finish (auto-grade)
-attemptsRouter.post("/:id/submit", async (req, res, next) => {
-  try {
-    const attemptId = z.string().uuid().parse(req.params.id);
-    const profileId = (req.session as any).profileId;
-
-    const [att] = await db.select().from(quizAttempt).where(eq(quizAttempt.id, attemptId));
-    if (!att || att.studentProfileId !== profileId) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Attempt not found" } });
-    if (att.status !== "IN_PROGRESS") return res.status(400).json({ error: { code: "STATE", message: "Attempt not in progress" } });
-
-    // enforce time limit if set
-    if (att.timeLimitSec && att.startedAt) {
-      const elapsed = (Date.now() - new Date(att.startedAt).getTime()) / 1000;
-      if (elapsed > att.timeLimitSec + 30) { /* allow small grace */ }
-    }
-
-    const graded = await gradeAttempt(attemptId);
-    await writeAudit({ action: "QUIZ_ATTEMPT_SUBMIT", entityType: "QUIZ_ATTEMPT", entityId: attemptId, meta: graded, actor: actorFromReq(req) });
-    res.json(graded);
-  } catch (e) { next(e); }
-});
-
-// Attempt details (student or teacher/admin)
-attemptsRouter.get("/:id", async (req, res, next) => {
-  try {
-    const attemptId = z.string().uuid().parse(req.params.id);
-    const profileId = (req.session as any).profileId;
-    const roles: string[] = (req.session as any).user?.roles ?? [];
-
-    const [att] = await db.select().from(quizAttempt).where(eq(quizAttempt.id, attemptId));
-    if (!att) return res.status(404).json({ error: { code: "NOT_FOUND", message: "Attempt not found" } });
-    const canView = roles.includes("ADMIN") || roles.includes("STAFF") || att.studentProfileId === profileId;
-    if (!canView) return res.status(403).json({ error: { code: "NOT_ALLOWED", message: "Access denied" } });
-
-    const answers = await db.select().from(attemptAnswer).where(eq(attemptAnswer.attemptId, attemptId));
-    res.json({ attempt: att, answers });
-  } catch (e) { next(e); }
-});
-5.4 Teacher: submissions overview
-ts
-Copier le code
-// src/modules/assessments/teacher.routes.ts
-import { Router } from "express";
-import { db } from "../../db/client";
-import { quizAttempt, profiles } from "../../db/schema/assess";
-import { eq } from "drizzle-orm";
-import { z } from "zod";
-import { requireAuth } from "../../middlewares/rbac";
-
-export const teacherRouter = Router();
-teacherRouter.use(requireAuth);
-
-teacherRouter.get("/quizzes/:id/submissions", async (req, res, next) => {
-  try {
+// Get one incident (role-aware)
+disciplineRouter.get("/discipline/incidents/:id", async (req:any,res,next)=>{
+  try{
     const id = z.string().uuid().parse(req.params.id);
-    const rows = await db.select().from(quizAttempt).where(eq(quizAttempt.quizId, id));
-    // (Optionally join profiles to show student names)
-    res.json(rows);
-  } catch (e) { next(e); }
+    const [inc] = await db.select().from(disciplineIncident).where(eq(disciplineIncident.id, id));
+    if (!inc) return res.status(404).json({ error:{ code:"NOT_FOUND", message:"Incident not found" } });
+
+    const roles: string[] = await rolesOf(req.session.user.id);
+    const isOwner = inc.reportedByProfileId === req.session.profileId;
+
+    // Load participants and actions
+    const parts = await db.select().from(disciplineIncidentParticipant).where(eq(disciplineIncidentParticipant.incidentId, id));
+    const acts = await db.select().from(disciplineAction).where(eq(disciplineAction.incidentId, id));
+    const atts = await db.select().from(disciplineIncidentAttachment).where(eq(disciplineIncidentAttachment.incidentId, id));
+
+    // Visibility enforcement for non-privileged viewers
+    const myPid = req.session.profileId as string;
+    const isStudentSelf = parts.some(p => p.profileId === myPid && p.role === "PERPETRATOR");
+    const isGuardian = roles.includes("GUARDIAN"); // guardian-child check is done on "students/:id/record" endpoint
+
+    if (!isPrivileged(roles) && !isOwner && !roles.includes("TEACHER")) {
+      if (inc.visibility === "PRIVATE") return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Private incident" } });
+      if (inc.visibility === "STUDENT" && !isStudentSelf) return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Student-only" } });
+      // "GUARDIAN" allowed for student self too
+    }
+
+    res.json({ incident: inc, participants: parts, actions: acts, attachments: atts });
+  }catch(e){ next(e); }
 });
-6) Wiring
+
+// List (filters)
+disciplineRouter.get("/discipline/incidents", async (req:any,res,next)=>{
+  try{
+    const q = ListIncidentsQuery.parse(req.query);
+    const roles: string[] = await rolesOf(req.session.user.id);
+
+    const conds:any[] = [];
+    if (q.status) conds.push(eq(disciplineIncident.status, q.status as any));
+    if (q.myReported === "true") conds.push(eq(disciplineIncident.reportedByProfileId, req.session.profileId));
+    // student filter: join via participants
+    let idsFilter:string[]|null = null;
+    if (q.studentProfileId) {
+      const rows = await db.select().from(disciplineIncidentParticipant)
+        .where(and(eq(disciplineIncidentParticipant.profileId, q.studentProfileId), inArray(disciplineIncidentParticipant.role, ["PERPETRATOR","VICTIM"] as any)));
+      idsFilter = rows.map(r => r.incidentId);
+      if (!idsFilter.length) return res.json({ items: [], nextCursor: null });
+    }
+
+    let base = db.select().from(disciplineIncident);
+    if (conds.length) base = base.where((and as any)(...conds));
+    let rows = await base.orderBy(desc(disciplineIncident.createdAt)).limit(q.limit);
+
+    if (idsFilter) rows = rows.filter(r => idsFilter!.includes(r.id));
+
+    // For non-privileged: filter to published or ones they reported
+    if (!isPrivileged(roles)) {
+      rows = rows.filter(r => r.visibility !== "PRIVATE" || r.reportedByProfileId === req.session.profileId);
+    }
+
+    const nextCursor = rows.length ? rows[rows.length - 1].createdAt?.toISOString() : null;
+    res.json({ items: rows, nextCursor });
+  }catch(e){ next(e); }
+});
+
+// Delete (Admin/Staff or reporter)
+disciplineRouter.delete("/discipline/incidents/:id", async (req:any,res,next)=>{
+  try{
+    const id = z.string().uuid().parse(req.params.id);
+    const [inc] = await db.select().from(disciplineIncident).where(eq(disciplineIncident.id, id));
+    if (!inc) return res.status(404).json({ error:{ code:"NOT_FOUND", message:"Incident not found" } });
+    const roles: string[] = await rolesOf(req.session.user.id);
+    if (!(isPrivileged(roles) || inc.reportedByProfileId === req.session.profileId)) {
+      return res.status(403).json({ error:{ code:"NOT_ALLOWED", message:"Not allowed" } });
+    }
+    await db.delete(disciplineIncident).where(eq(disciplineIncident.id, id));
+    await writeAudit({ action:"DISC_INCIDENT_DELETE", entityType:"DISC_INCIDENT", entityId: id, summary:"", actor:actorFromReq(req) });
+    res.json({ ok:true });
+  }catch(e){ next(e); }
+});
+
+/** --- Detention Sessions (Admin/Staff) --- */
+
+disciplineRouter.post("/discipline/detention-sessions", requireRoles(["ADMIN","STAFF"]), async (req:any,res,next)=>{
+  try{
+    const dto = CreateDetentionDto.parse(req.body);
+    const [row] = await db.insert(detentionSession).values({
+      title: dto.title,
+      dateTime: dto.dateTime,
+      durationMinutes: dto.durationMinutes,
+      room: dto.room ?? null,
+      capacity: dto.capacity,
+      createdByProfileId: req.session.profileId
+    }).returning();
+    await writeAudit({ action:"DISC_DETENTION_CREATE", entityType:"DISC_DETENTION", entityId: row.id, summary:row.title, actor:actorFromReq(req) });
+    res.status(201).json(row);
+  }catch(e){ next(e); }
+});
+
+disciplineRouter.get("/discipline/detention-sessions", requireRoles(["ADMIN","STAFF"]), async (_req,res,next)=>{
+  try{
+    const rows = await db.select().from(detentionSession).orderBy(desc(detentionSession.dateTime));
+    res.json({ items: rows });
+  }catch(e){ next(e); }
+});
+
+disciplineRouter.post("/discipline/detention-sessions/:id/enroll", requireRoles(["ADMIN","STAFF"]), async (req,res,next)=>{
+  try{
+    const sessionId = z.string().uuid().parse(req.params.id);
+    const dto = EnrollDetentionDto.parse({ ...req.body, sessionId });
+    const [s] = await db.select().from(detentionSession).where(eq(detentionSession.id, sessionId));
+    if (!s) return res.status(404).json({ error:{ code:"NOT_FOUND", message:"Session not found" } });
+
+    // action must be DETENTION and belongs to the student
+    const [act] = await db.select().from(disciplineAction).where(eq(disciplineAction.id, dto.actionId));
+    if (!act || act.type !== "DETENTION" || act.profileId !== dto.studentProfileId) {
+      return res.status(400).json({ error:{ code:"INVALID_ACTION", message:"Action not detention for this student" } });
+    }
+
+    // capacity check (soft)
+    const current = await db.select().from(detentionSessionEnrollment).where(eq(detentionSessionEnrollment.sessionId, sessionId));
+    if (current.length >= s.capacity) return res.status(409).json({ error:{ code:"FULL", message:"Session full" } });
+
+    await db.insert(detentionSessionEnrollment).values({
+      sessionId, actionId: dto.actionId, studentProfileId: dto.studentProfileId
+    }).onConflictDoNothing();
+
+    res.json({ ok:true });
+  }catch(e){ next(e); }
+});
+
+disciplineRouter.post("/discipline/detention-sessions/:id/attendance/:studentProfileId", requireRoles(["ADMIN","STAFF"]), async (req,res,next)=>{
+  try{
+    const sessionId = z.string().uuid().parse(req.params.id);
+    const studentProfileId = z.string().uuid().parse(req.params.studentProfileId);
+    const { present } = MarkAttendanceDto.parse(req.body);
+
+    await db.insert(detentionSessionAttendance).values({ sessionId, studentProfileId, present })
+      .onConflictDoUpdate({ target:[detentionSessionAttendance.sessionId, detentionSessionAttendance.studentProfileId],
+        set: { present, recordedAt: new Date() } });
+
+    // If present and linked action is detention: mark action completed
+    if (present) {
+      const links = await db.select().from(detentionSessionEnrollment)
+        .where(and(eq(detentionSessionEnrollment.sessionId, sessionId), eq(detentionSessionEnrollment.studentProfileId, studentProfileId)));
+      for (const l of links) {
+        await db.update(disciplineAction).set({ completedAt: new Date() }).where(eq(disciplineAction.id, l.actionId));
+      }
+    }
+
+    await writeAudit({ action:"DISC_DETENTION_ATTEND", entityType:"DISC_DETENTION", entityId: sessionId, summary:`present=${present}`, actor:actorFromReq(req) });
+    res.json({ ok:true });
+  }catch(e){ next(e); }
+});
+
+/** --- Student / Guardian Views --- */
+
+// Student: my record (published only)
+disciplineRouter.get("/discipline/my-record", async (req:any,res,next)=>{
+  try{
+    const pid = req.session.profileId as string;
+    const parts = await db.select().from(disciplineIncidentParticipant).where(eq(disciplineIncidentParticipant.profileId, pid));
+    if (!parts.length) return res.json({ items: [], points: 0 });
+
+    const ids = parts.map(p=>p.incidentId);
+    const incs = await db.select().from(disciplineIncident).where(inArray(disciplineIncident.id, ids));
+    const visible = incs.filter(i => i.visibility !== "PRIVATE"); // STUDENT or GUARDIAN okay
+
+    const acts = await db.select().from(disciplineAction).where(and(inArray(disciplineAction.incidentId, visible.map(v=>v.id)), eq(disciplineAction.profileId, pid)));
+    const points = acts.reduce((acc,a)=> acc + (a.points || 0), 0);
+
+    res.json({ items: visible, points });
+  }catch(e){ next(e); }
+});
+
+// Guardian: child record (published=GUARDIAN)
+disciplineRouter.get("/discipline/students/:studentProfileId/record", async (req:any,res,next)=>{
+  try{
+    const studentProfileId = z.string().uuid().parse(req.params.studentProfileId);
+    // TODO: verify guardian ↔ student link per M3 (omitted here to keep file concise)
+    const parts = await db.select().from(disciplineIncidentParticipant).where(eq(disciplineIncidentParticipant.profileId, studentProfileId));
+    const ids = parts.map(p=>p.incidentId);
+    const incs = await db.select().from(disciplineIncident).where(inArray(disciplineIncident.id, ids));
+    const visible = incs.filter(i => i.visibility === "GUARDIAN");
+
+    const acts = await db.select().from(disciplineAction).where(and(inArray(disciplineAction.incidentId, visible.map(v=>v.id)), eq(disciplineAction.profileId, studentProfileId)));
+    const points = acts.reduce((acc,a)=> acc + (a.points || 0), 0);
+
+    res.json({ items: visible, points });
+  }catch(e){ next(e); }
+});
+Wiring
+
 ts
 Copier le code
 // src/app.ts (excerpt)
-import { questionsRouter } from "./modules/assessments/questions.routes";
-import { quizzesRouter } from "./modules/assessments/quizzes.routes";
-import { attemptsRouter } from "./modules/assessments/attempts.routes";
-import { teacherRouter } from "./modules/assessments/teacher.routes";
+import { disciplineRouter } from "./modules/discipline/routes";
+app.use("/api", disciplineRouter);
+5) Audit Events (Module 6)
+Emit at minimum:
 
-app.use("/api/assessments/questions", questionsRouter);
-app.use("/api/assessments/quizzes", quizzesRouter);
-app.use("/api/assessments/attempts", attemptsRouter);
-app.use("/api/assessments/teacher", teacherRouter);
-7) Security & i18n
-Use requireAuth everywhere. Keep RBAC strict: only teachers/admin/staff can modify questions/quizzes.
+DISC_CAT_CREATE
 
-Locale resolution from request; fall back to fr.
+DISC_INCIDENT_CREATE, DISC_INCIDENT_UPDATE, DISC_INCIDENT_DELETE, DISC_INCIDENT_PUBLISH
 
-Never send correctness flags or option isCorrect to students; only send ordered options with text.
+DISC_ACTION_ASSIGN, DISC_ACTION_COMPLETE, DISC_ACTION_REOPEN
 
-Seal per-attempt question/option order on the server.
+DISC_DETENTION_CREATE, DISC_DETENTION_ATTEND
 
-8) OpenAPI (fragment)
-yaml
-Copier le code
-paths:
-  /api/assessments/questions:
-    get: { summary: List questions }
-    post: { summary: Create question }
-  /api/assessments/questions/{id}:
-    patch: { summary: Update question }
-  /api/assessments/quizzes:
-    post: { summary: Create quiz }
-  /api/assessments/quizzes/{id}:
-    patch: { summary: Update quiz }
-  /api/assessments/quizzes/{id}/publish:
-    post: { summary: Publish or unpublish a quiz }
-  /api/assessments/quizzes/available:
-    get: { summary: List quizzes available to current student }
-  /api/assessments/attempts/start:
-    post: { summary: Start an attempt }
-  /api/assessments/attempts/{id}/answers:
-    post: { summary: Save answers (partial or full) }
-  /api/assessments/attempts/{id}/submit:
-    post: { summary: Submit and auto-grade attempt }
-  /api/assessments/attempts/{id}:
-    get: { summary: Get attempt details (student or staff) }
-  /api/assessments/teacher/quizzes/{id}/submissions:
-    get: { summary: List submissions for a quiz }
-9) Manual Tests (cURL)
+6) Manual Tests (cURL)
 bash
 Copier le code
-# 0) Login (save cookies.txt) as TEACHER/ADMIN
+# 0) Login and keep cookies: cookies.txt
 
-# 1) Create questions
+# 1) Create category
+curl -b cookies.txt -H "Content-Type: application/json" -X POST \
+  -d '{"code":"BULLYING","defaultPoints":5,"translations":[{"locale":"fr","name":"Harcèlement"}]}' \
+  http://localhost:4000/api/discipline/categories
+
+# 2) Create incident with participants and attachment(s)
 curl -b cookies.txt -H "Content-Type: application/json" -X POST \
   -d '{
-    "type":"MCQ_SINGLE",
-    "translations":[{"locale":"fr","stemMd":"La capitale du Tchad ?","explanationMd":"N\'Djamena est la plus grande ville."}],
-    "options":[
-      {"isCorrect":true,"orderIndex":0,"translations":[{"locale":"fr","text":"N\'Djamena"}]},
-      {"isCorrect":false,"orderIndex":1,"translations":[{"locale":"fr","text":"Moundou"}]}
-    ]
-  }' http://localhost:4000/api/assessments/questions
+    "categoryId":"<CAT_ID>",
+    "summary":"Bagarre dans la cour",
+    "details":"Conflit entre élèves...",
+    "occurredAt":"2025-09-03T09:15:00.000Z",
+    "location":"Cour",
+    "participants":[
+      {"profileId":"<STUDENT_A>","role":"PERPETRATOR"},
+      {"profileId":"<STUDENT_B>","role":"VICTIM"}
+    ],
+    "attachments":["<FILE_ID>"]
+  }' http://localhost:4000/api/discipline/incidents
 
-# 2) Create quiz (audience: one class section)
+# 3) Assign detention to student A
 curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{
-    "translations":[{"locale":"fr","title":"Géographie — Test 1","descriptionMd":"10 minutes"}],
-    "timeLimitSec":600,
-    "maxAttempts":1,
-    "shuffleQuestions":true,
-    "shuffleOptions":true,
-    "openAt":"2025-09-01T08:00:00Z",
-    "closeAt":"2025-09-01T23:00:00Z",
-    "audience":[{"scope":"CLASS_SECTION","classSectionId":"<SECTION_ID>"}],
-    "questions":[{"questionId":"<Q1_ID>","points":1,"orderIndex":0}]
-  }' http://localhost:4000/api/assessments/quizzes
+  -d '{"profileId":"<STUDENT_A>","type":"DETENTION","points":3,"dueAt":"2025-09-05T16:00:00.000Z","comment":"Présence obligatoire"}' \
+  http://localhost:4000/api/discipline/incidents/<INCIDENT_ID>/actions
 
-# 3) Publish
+# 4) Create detention session
 curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"publish":true}' \
-  http://localhost:4000/api/assessments/quizzes/<QUIZ_ID>/publish
+  -d '{"title":"Vendredi 16h","dateTime":"2025-09-05T16:00:00.000Z","durationMinutes":60,"room":"A1","capacity":20}' \
+  http://localhost:4000/api/discipline/detention-sessions
 
-# 4) Student lists available
-curl -b cookies.txt "http://localhost:4000/api/assessments/quizzes/available"
-
-# 5) Student starts attempt
+# 5) Enroll student A for that detention
 curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"quizId":"<QUIZ_ID>"}' \
-  http://localhost:4000/api/assessments/attempts/start
+  -d '{"sessionId":"<SESSION_ID>","actionId":"<ACTION_ID>","studentProfileId":"<STUDENT_A>"}' \
+  http://localhost:4000/api/discipline/detention-sessions/<SESSION_ID>/enroll
 
-# -> returns { attemptId, questions:[{questionId, stemMd, optionOrder:[{id,text}], points}] }
-
-# 6) Student answers + submit
+# 6) Mark attendance (present=true) → auto-completes detention action
 curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{"answers":[{"questionId":"<Q1_ID>","selectedOptionIds":["<OPTION_ID_CORRECT>"]}]}' \
-  http://localhost:4000/api/assessments/attempts/<ATTEMPT_ID>/answers
+  -d '{"present":true}' \
+  http://localhost:4000/api/discipline/detention-sessions/<SESSION_ID>/attendance/<STUDENT_A>
 
+# 7) Publish incident to guardians
 curl -b cookies.txt -H "Content-Type: application/json" -X POST \
-  -d '{}' \
-  http://localhost:4000/api/assessments/attempts/<ATTEMPT_ID>/submit
+  -d '{"visibility":"GUARDIAN"}' \
+  http://localhost:4000/api/discipline/incidents/<INCIDENT_ID>/publish
 
-# 7) Teacher views submissions
-curl -b cookies.txt "http://localhost:4000/api/assessments/teacher/quizzes/<QUIZ_ID>/submissions"
-10) Definition of Done
- Schema created with enums/tables/indexes.
+# 8) Student checks their record
+curl -b cookies.txt http://localhost:4000/api/discipline/my-record
+7) Definition of Done
+ Schema: all tables & indexes created; enums in place.
 
- Question CRUD with multilingual stems/options; correctness only server-side.
+ Categories: CRUD (at least create/list).
 
- Quiz CRUD with translations, audience, schedule, points; publish/unpublish.
+ Incidents: create/update/delete, add participants, add attachments, status transitions, visibility controls.
 
- Student availability honors status + window + audience + attempts.
+ Actions: assign/complete with points; teacher may act only for their students; points aggregated via query.
 
- Start seals per-attempt question & option order; timeLimit snapshot.
+ Detention: create sessions, enroll students via detention actions, mark attendance; attendance completion auto-completes action.
 
- Save answers endpoint idempotent; finish grades automatically.
+ Role-aware views:
 
- Results stored (score, maxScore); attempts visible to teacher/admin and the student.
+Staff/Admin full.
 
- Audit events emitted: QUESTION_CREATE/UPDATE, QUIZ_CREATE/UPDATE/PUBLISH/UNPUBLISH, QUIZ_ATTEMPT_START/SUBMIT.
+Teacher limited to their students.
 
- No secrets in payloads; i18n respected (fr default; ar/en available).
+Student own published record.
 
-11) Future Enhancements
-Short-answer/essay items (manual grading + rubric).
+Guardian child GUARDIAN-published record.
 
-Per-section randomization pools and per-student question sampling.
+ Files: attachments stored via Module 7.
 
-PIN / access code; IP allowlist; re-entry rules.
+ Audit: events emitted for all key operations.
 
-CSV export of attempts; analytics per question (discrimination, difficulty).
+ i18n: category translations supported, error messages ready for localization.
 
-Post-submission feedback policy (show answers after closeAt).
+ Security: visibility enforced; strict role checks; input validation via Zod.
 
-Item banks per subject with sharing between teachers.
+ No placeholders: sample cURL covers end-to-end happy path.
+
+8) Future (optional, later modules)
+Escalation workflow (referrals to counselor/discipline board).
+
+Appeal records with outcomes.
+
+Automated policies: thresholds for points → automatic actions.
+
+Guardian acknowledgement flow (read receipts).
+
+Analytics dashboard (incidents by category/section/time).
+
+Conflict with attendance/suspension days (block timetable and mark as excused where applicable).
+
+Copier le code

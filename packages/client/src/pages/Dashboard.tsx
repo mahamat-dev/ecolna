@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { get } from '@/lib/api';
 import { useNavigate } from 'react-router-dom';
-import { Users, GraduationCap, BookOpen, Calendar, TrendingUp, UserPlus, FileText, Clock } from 'lucide-react';
+import { Users, GraduationCap, BookOpen, Calendar, TrendingUp, UserPlus, FileText, Clock, Shield, DollarSign, MessageSquare } from 'lucide-react';
 import { useNotesList } from '@/modules/content/hooks';
 
 interface DashboardMetrics {
@@ -113,6 +113,27 @@ export default function Dashboard() {
       icon: Clock,
       path: '/attendance/take',
       color: 'bg-warning-500'
+    },
+    {
+      title: 'Discipline',
+      description: 'Gérer les incidents et la discipline',
+      icon: Shield,
+      path: '/discipline/incidents',
+      color: 'bg-red-500'
+    },
+    {
+      title: 'Finance',
+      description: 'Gérer les factures et paiements',
+      icon: DollarSign,
+      path: '/finance/invoices',
+      color: 'bg-green-500'
+    },
+    {
+      title: 'Messages',
+      description: 'Envoyer et recevoir des messages',
+      icon: MessageSquare,
+      path: '/messages',
+      color: 'bg-blue-500'
     },
     {
       title: 'Rapport',

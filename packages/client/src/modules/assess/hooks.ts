@@ -21,6 +21,7 @@ export const qk = {
   attempt: (id?: string, locale?: string) => ['assess', 'attempt', id, locale] as const,
   questions: (filters?: { subjectId?: string; createdByProfileId?: string }) => ['assess', 'questions', filters] as const,
   submissions: (quizId: string) => ['assess', 'submissions', quizId] as const,
+  myQuizzes: ['assess','my-quizzes'] as const,
 };
 
 export function useAvailableQuizzes() {
@@ -81,4 +82,10 @@ export function useSubmissions(quizId: string) {
 
 export function useAttempt(id?: string, locale?: string) {
   return useQuery({ queryKey: qk.attempt(id, locale), queryFn: () => getAttempt(id!, locale), enabled: !!id });
+}
+
+// Teacher
+import { listMyQuizzes } from './api';
+export function useMyQuizzes() {
+  return useQuery({ queryKey: qk.myQuizzes, queryFn: listMyQuizzes });
 }

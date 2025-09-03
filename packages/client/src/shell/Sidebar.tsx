@@ -16,6 +16,7 @@ import {
   MenuIcon,
   FileTextIcon
 } from '@/icons';
+import { Shield, DollarSign, MessageSquare } from 'lucide-react';
 
 type NavItem = {
   name: string;
@@ -109,6 +110,38 @@ export function Sidebar() {
       ]
     },
     {
+      icon: <Shield className="w-5 h-5" />,
+      name: t('menu.discipline'),
+      labelKey: 'menu.discipline',
+      subItems: [
+        { name: t('menu.incidents'), path: '/discipline/incidents', labelKey: 'menu.incidents' },
+        { name: t('menu.categories'), path: '/discipline/categories', labelKey: 'menu.categories' },
+        { name: t('menu.detention'), path: '/discipline/detention', labelKey: 'menu.detention' }
+      ]
+    },
+    {
+      icon: <DollarSign className="w-5 h-5" />,
+      name: t('menu.finance'),
+      labelKey: 'menu.finance',
+      subItems: [
+        { name: t('menu.feeSchedules') ?? 'Barèmes', path: '/finance/fees/schedules', labelKey: 'menu.feeSchedules' },
+        { name: t('menu.feeAssign') ?? 'Affectations', path: '/finance/fees/assign', labelKey: 'menu.feeAssign' },
+        { name: t('menu.invoices'), path: '/finance/invoices', labelKey: 'menu.invoices' },
+        { name: t('menu.payments'), path: '/finance/payments', labelKey: 'menu.payments' },
+        { name: t('menu.advancesAdmin') ?? 'Avances (admin)', path: '/finance/advances/admin', labelKey: 'menu.advancesAdmin' },
+        { name: t('menu.payroll'), path: '/finance/payroll', labelKey: 'menu.payroll' }
+      ]
+    },
+    {
+      icon: <MessageSquare className="w-5 h-5" />,
+      name: t('menu.messages'),
+      labelKey: 'menu.messages',
+      subItems: [
+        { name: t('menu.inbox'), path: '/messages', labelKey: 'menu.inbox' },
+        { name: t('menu.compose'), path: '/messages/compose', labelKey: 'menu.compose' }
+      ]
+    },
+    {
       icon: <HistoryIcon />,
       name: t('menu.audit'),
       labelKey: 'menu.audit',
@@ -154,6 +187,37 @@ export function Sidebar() {
       subItems: [
         { name: t('menu.notes'), path: '/content/notes', labelKey: 'menu.notes' }
       ]
+    },
+    {
+      icon: <Shield className="w-5 h-5" />,
+      name: t('menu.discipline'),
+      labelKey: 'menu.discipline',
+      subItems: [
+        { name: t('menu.incidents'), path: '/discipline/incidents', labelKey: 'menu.incidents' },
+        { name: t('menu.detention'), path: '/discipline/detention', labelKey: 'menu.detention' }
+      ]
+    },
+    {
+      icon: <DollarSign className="w-5 h-5" />,
+      name: t('menu.finance'),
+      labelKey: 'menu.finance',
+      subItems: [
+        { name: t('menu.feeSchedules') ?? 'Barèmes', path: '/finance/fees/schedules', labelKey: 'menu.feeSchedules' },
+        { name: t('menu.feeAssign') ?? 'Affectations', path: '/finance/fees/assign', labelKey: 'menu.feeAssign' },
+        { name: t('menu.invoices'), path: '/finance/invoices', labelKey: 'menu.invoices' },
+        { name: t('menu.payments'), path: '/finance/payments', labelKey: 'menu.payments' },
+        { name: t('menu.advancesAdmin') ?? 'Avances (admin)', path: '/finance/advances/admin', labelKey: 'menu.advancesAdmin' },
+        { name: t('menu.payroll'), path: '/finance/payroll', labelKey: 'menu.payroll' }
+      ]
+    },
+    {
+      icon: <MessageSquare className="w-5 h-5" />,
+      name: t('menu.messages'),
+      labelKey: 'menu.messages',
+      subItems: [
+        { name: t('menu.inbox'), path: '/messages', labelKey: 'menu.inbox' },
+        { name: t('menu.compose'), path: '/messages/compose', labelKey: 'menu.compose' }
+      ]
     }
   ];
 
@@ -185,6 +249,32 @@ export function Sidebar() {
       labelKey: 'menu.content',
       subItems: [
         { name: t('menu.notes'), path: '/content/notes', labelKey: 'menu.notes' }
+      ]
+    },
+    {
+      icon: <Shield className="w-5 h-5" />,
+      name: t('menu.discipline'),
+      labelKey: 'menu.discipline',
+      subItems: [
+        { name: t('menu.incidents'), path: '/discipline/incidents', labelKey: 'menu.incidents' }
+      ]
+    },
+    {
+      icon: <DollarSign className="w-5 h-5" />,
+      name: t('menu.finance'),
+      labelKey: 'menu.finance',
+      subItems: [
+        { name: t('menu.advances') ?? 'Avances', path: '/finance/advances', labelKey: 'menu.advances' },
+        { name: t('menu.myPayslips') ?? 'Mes fiches de paie', path: '/finance/me/payslips', labelKey: 'menu.myPayslips' }
+      ]
+    },
+    {
+      icon: <MessageSquare className="w-5 h-5" />,
+      name: t('menu.messages'),
+      labelKey: 'menu.messages',
+      subItems: [
+        { name: t('menu.inbox'), path: '/messages', labelKey: 'menu.inbox' },
+        { name: t('menu.compose'), path: '/messages/compose', labelKey: 'menu.compose' }
       ]
     }
   ];
@@ -221,6 +311,24 @@ export function Sidebar() {
       subItems: [
         { name: t('menu.notes'), path: '/student/notes', labelKey: 'menu.notes' }
       ]
+    },
+    {
+      icon: <MessageSquare className="w-5 h-5" />,
+      name: t('menu.messages'),
+      labelKey: 'menu.messages',
+      subItems: [
+        { name: t('menu.inbox'), path: '/messages', labelKey: 'menu.inbox' },
+        { name: t('menu.compose'), path: '/messages/compose', labelKey: 'menu.compose' }
+      ]
+    }
+    ,
+    {
+      icon: <DollarSign className="w-5 h-5" />,
+      name: t('menu.finance'),
+      labelKey: 'menu.finance',
+      subItems: [
+        { name: t('menu.myInvoices') ?? 'Mes factures', path: '/finance/me/invoices', labelKey: 'menu.myInvoices' }
+      ]
     }
   ];
 
@@ -249,6 +357,15 @@ export function Sidebar() {
       labelKey: 'menu.content',
       subItems: [
         { name: t('menu.notes'), path: '/guardian/notes', labelKey: 'menu.notes' }
+      ]
+    },
+    {
+      icon: <MessageSquare className="w-5 h-5" />,
+      name: t('menu.messages'),
+      labelKey: 'menu.messages',
+      subItems: [
+        { name: t('menu.inbox'), path: '/messages', labelKey: 'menu.inbox' },
+        { name: t('menu.compose'), path: '/messages/compose', labelKey: 'menu.compose' }
       ]
     }
   ];
@@ -285,7 +402,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className={`fixed left-0 top-0 z-50 h-screen bg-white border-r border-gray-200 transition-all duration-300 ease-in-out dark:bg-gray-900 dark:border-gray-800 ${
+      className={`fixed left-0 top-0 z-50 h-screen bg-white border-r border-gray-200 transition-all duration-300 ease-in-out dark:bg-gray-900 dark:border-gray-800 flex flex-col ${
         isExpanded ? 'w-[290px]' : 'w-[90px]'
       }`}
       onMouseEnter={() => setIsHovered(true)}
@@ -298,11 +415,11 @@ export function Sidebar() {
         <span className="text-xl font-semibold">Ecolna</span>
       </div>
 
-      <nav className="mt-4">
+      <nav className="mt-4 flex-1 overflow-y-auto px-2">
         {navItems.map((item) => (
           <div key={item.labelKey}>
             {item.subItems ? (
-              <div className={`px-4 py-2 cursor-pointer flex items-center justify-between ${isItemActive(item) ? 'bg-gray-100 dark:bg-gray-800' : ''}`}
+              <div className={`px-2 py-2 cursor-pointer flex items-center justify-between ${isItemActive(item) ? 'bg-gray-100 dark:bg-gray-800' : ''}`}
                    onClick={() => toggleSubmenu(item.name)}>
                 <div className="flex items-center gap-3">
                   {item.icon}
@@ -316,7 +433,7 @@ export function Sidebar() {
               <NavLink
                 to={item.path || '#'}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 px-4 py-2 ${isItemActive(item) || isActive ? 'bg-gray-100 dark:bg-gray-800' : ''}`
+                  `flex items-center gap-3 px-2 py-2 ${isItemActive(item) || isActive ? 'bg-gray-100 dark:bg-gray-800' : ''}`
                 }
               >
                 {item.icon}
@@ -325,13 +442,13 @@ export function Sidebar() {
             )}
 
             {item.subItems && openSubmenu === item.name && (
-              <div className="ml-6 mt-1 space-y-1">
+              <div className="ml-4 mt-1 space-y-1">
                 {item.subItems.map((sub) => (
                   <NavLink
                     key={sub.labelKey}
                     to={sub.path}
                     className={({ isActive }) =>
-                      `block px-4 py-2 text-sm rounded ${isSubItemActive(sub.path) || isActive ? 'bg-gray-100 dark:bg-gray-800' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`
+                      `block px-2 py-2 text-sm rounded ${isSubItemActive(sub.path) || isActive ? 'bg-gray-100 dark:bg-gray-800' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`
                     }
                   >
                     {sub.name}

@@ -1,760 +1,810 @@
-# CLAUDE.client-roles.md
-**Multi-Role Client (Teacher • Student • Guardian/Parent • Staff)**  
-_Frontend: React + TypeScript + Vite + Tailwind + shadcn/ui + TanStack Query • i18n (fr default, ar, en)_
+# CLAUDE.module-11-discipline.client.md
+**Module 11 — Discipline (Client)**  
+_Client: React + TypeScript + TailwindCSS + shadcn/ui + TanStack Query/Table • i18n (fr default, ar, en) • Auth/RBAC from existing app • File uploads via Module 7_
 
-This guide wires the **client side** for **Modules 1–8** for **non-admin** users, using the server APIs you already have:
-- **M1** Auth/Users/Profiles/Roles
-- **M2** Academics (stages/grades/sections/subjects/timetable)
-- **M3** Enrollment & Guardianship
-- **M4** Teaching Assignments
-- **M5** Attendance
-- **M6** Audit Log (read-only in UI)
-- **M7** Content & Files (notes + local storage)
-- **M8** Assessments (MCQ quizzes)
-
-> This file contains **routes**, **RBAC guards**, **core pages**, **API clients**, **hooks**, and **key components** for **Teacher**, **Student**, **Guardian/Parent**, and **Staff** workspaces.  
-> No bootstrap or layout code is included; drop these pieces into your app shell.
+This file adds a full **Discipline** UI for Admin/Staff/Teacher (manage incidents, actions, detentions) and Student/Guardian (read-only records). It wires against the **server endpoints from Module 11 (Discipline - Server)** and **Module 7 (Content & Files)**.
 
 ---
 
-## 0) Conventions & Prereqs
+## 0) Assumptions
 
-- **Auth**: `/api/me` returns `{ user: { id, roles: string[] }, profile: { id, ... } }` (cookie session).  
-- **Locale**: send `Accept-Language` (fr|en|ar). If `ar`, set `dir="rtl"`.
-- **RBAC**: Render pages if user has the required role; hide menu items otherwise.
-- **No password/self-service**: Only admin can change passwords. Do **not** surface change-password UI.
+- You already have:
+  - `http` helper (wraps `fetch`, handles JSON, cookies, errors).
+  - `useAuth()` returning `{ me, hasRole(role), is(role), profileId }`.
+  - `i18n` hook `t()` with locales **fr** (default), **ar**, **en**.
+  - Global styles/components from shadcn/ui.
+- Routes are mounted under `/discipline/*` in the client.
+- For picking students/teachers, you can:
+  - Paste `profileId` directly (works now), **and/or**
+  - Use your existing people pickers (e.g., Module 3 Enrollment selectors) if available.
 
-Utilities used below:
+> If you don’t yet have a people picker, start with **ID/Code inputs** (no placeholder data) and improve later.
+
+---
+
+## 1) Module Structure (client)
+
+src/
+modules/
+discipline/
+api.ts
+hooks.ts
+components/
+IncidentForm.tsx
+ParticipantRow.tsx
+ActionAssignDialog.tsx
+PublishVisibility.tsx
+DetentionForm.tsx
+DetentionEnrollDrawer.tsx
+AttendanceToggle.tsx
+AttachmentsList.tsx
+FileUploaderM7.tsx
+IncidentsTable.tsx
+pages/
+IncidentsListPage.tsx
+IncidentCreatePage.tsx
+IncidentDetailPage.tsx
+DetentionSessionsPage.tsx
+MyDisciplinePage.tsx
+GuardianChildRecordPage.tsx
+i18n.ts
+router/
+routes.discipline.tsx
+
+pgsql
+Copier le code
+
+Register the routes in your app router and add a **Discipline** nav item for roles: **ADMIN, STAFF, TEACHER**. Students/Guardians see only their record pages.
+
+---
+
+## 2) API Client
 
 ```ts
-// src/lib/env.ts
-export const API_URL = import.meta.env.VITE_API_URL as string;
+// src/modules/discipline/api.ts
+import { http } from "@/lib/http";
 
-// src/lib/i18n.ts
-export type Locale = 'fr'|'en'|'ar';
-export function getLocale(): Locale { return (localStorage.getItem('locale') as Locale) || 'fr'; }
-export function isRTL(loc: Locale) { return loc === 'ar'; }
+export type UUID = string;
 
-// src/lib/http.ts
-export async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', 'Accept-Language': getLocale(), ...(init?.headers||{}) },
-    ...init,
+export const DisciplineAPI = {
+  // --- Categories ---
+  listCategories: () => http(`/discipline/categories`),
+  createCategory: (body: {
+    code: string; defaultPoints?: number;
+    translations: { locale: "fr"|"en"|"ar"; name: string; description?: string }[];
+  }) => http(`/discipline/categories`, { method: "POST", body: JSON.stringify(body) }),
+
+  // --- Incidents ---
+  listIncidents: (params: { status?: string; studentProfileId?: UUID; myReported?: "true"|"false"; limit?: number; cursor?: string }) =>
+    http(`/discipline/incidents?${new URLSearchParams(params as any).toString()}`),
+  getIncident: (id: UUID) => http(`/discipline/incidents/${id}`),
+  createIncident: (body: {
+    categoryId?: UUID|null; summary: string; details?: string; occurredAt: string;
+    location?: string; classSectionId?: UUID;
+    participants: { profileId: UUID; role: "PERPETRATOR"|"VICTIM"|"WITNESS"; note?: string }[];
+    attachments?: UUID[];
+  }) => http(`/discipline/incidents`, { method: "POST", body: JSON.stringify(body) }),
+  updateIncident: (id: UUID, body: any) => http(`/discipline/incidents/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  publishIncident: (id: UUID, visibility: "PRIVATE"|"STUDENT"|"GUARDIAN") =>
+    http(`/discipline/incidents/${id}/publish`, { method: "POST", body: JSON.stringify({ visibility }) }),
+  deleteIncident: (id: UUID) => http(`/discipline/incidents/${id}`, { method: "DELETE" }),
+
+  // --- Actions ---
+  addAction: (incidentId: UUID, body: {
+    profileId: UUID; type: "WARNING"|"DETENTION"|"SUSPENSION_IN_SCHOOL"|"SUSPENSION_OUT_OF_SCHOOL"|"PARENT_MEETING"|"COMMUNITY_SERVICE";
+    points?: number; dueAt?: string; comment?: string;
+  }) => http(`/discipline/incidents/${incidentId}/actions`, { method: "POST", body: JSON.stringify(body) }),
+  completeAction: (actionId: UUID, completed: boolean, comment?: string) =>
+    http(`/discipline/actions/${actionId}/complete`, { method: "POST", body: JSON.stringify({ completed, comment }) }),
+
+  // --- Detention ---
+  listDetentions: () => http(`/discipline/detention-sessions`),
+  createDetention: (body: { title: string; dateTime: string; durationMinutes: number; room?: string; capacity: number }) =>
+    http(`/discipline/detention-sessions`, { method: "POST", body: JSON.stringify(body) }),
+  enrollDetention: (sessionId: UUID, body: { sessionId: UUID; actionId: UUID; studentProfileId: UUID }) =>
+    http(`/discipline/detention-sessions/${sessionId}/enroll`, { method: "POST", body: JSON.stringify(body) }),
+  markDetentionAttendance: (sessionId: UUID, studentProfileId: UUID, present: boolean) =>
+    http(`/discipline/detention-sessions/${sessionId}/attendance/${studentProfileId}`, { method: "POST", body: JSON.stringify({ present }) }),
+
+  // --- Student/Guardian views ---
+  myRecord: () => http(`/discipline/my-record`),
+  guardianChildRecord: (studentProfileId: UUID) => http(`/discipline/students/${studentProfileId}/record`),
+
+  // --- Module 7 Files (helper flow) ---
+  presign: (filename: string, mime: string, sizeBytes: number, sha256?: string) =>
+    http(`/content/files/presign`, { method: "POST", body: JSON.stringify({ filename, mime, sizeBytes, sha256 }) }),
+  commit: (fileId: UUID, sizeBytes: number, sha256?: string) =>
+    http(`/content/files/commit`, { method: "POST", body: JSON.stringify({ fileId, sizeBytes, sha256 }) }),
+};
+3) Hooks (TanStack Query)
+ts
+Copier le code
+// src/modules/discipline/hooks.ts
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { DisciplineAPI } from "./api";
+
+export function useIncidentsList(params: any) {
+  return useQuery({ queryKey: ["disc","list", params], queryFn: () => DisciplineAPI.listIncidents(params) });
+}
+export function useIncident(id: string) {
+  return useQuery({ queryKey: ["disc","one", id], queryFn: () => DisciplineAPI.getIncident(id), enabled: !!id });
+}
+export function useDetentions() {
+  return useQuery({ queryKey: ["disc","detentions"], queryFn: () => DisciplineAPI.listDetentions() });
+}
+export function useMyRecord() {
+  return useQuery({ queryKey: ["disc","my"], queryFn: () => DisciplineAPI.myRecord() });
+}
+export function useGuardianChildRecord(studentProfileId: string) {
+  return useQuery({ queryKey: ["disc","guardian", studentProfileId], queryFn: () => DisciplineAPI.guardianChildRecord(studentProfileId), enabled: !!studentProfileId });
+}
+
+export function useCreateIncident() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: DisciplineAPI.createIncident,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["disc","list"] }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(()=>({ error:{ message: res.statusText }}));
-    throw new Error(err?.error?.message || res.statusText);
+}
+export function useUpdateIncident(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body:any) => DisciplineAPI.updateIncident(id, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["disc","one", id] });
+      qc.invalidateQueries({ queryKey: ["disc","list"] });
+    },
+  });
+}
+export function useAddAction(incidentId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body:any) => DisciplineAPI.addAction(incidentId, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["disc","one", incidentId] }),
+  });
+}
+export function usePublishIncident(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (visibility:"PRIVATE"|"STUDENT"|"GUARDIAN") => DisciplineAPI.publishIncident(id, visibility),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["disc","one", id] }),
+  });
+}
+4) Components
+4.1 Module 7 File Uploader (attachments)
+tsx
+Copier le code
+// src/modules/discipline/components/FileUploaderM7.tsx
+import { useState } from "react";
+import { DisciplineAPI } from "../api";
+
+export function FileUploaderM7({ onUploaded }: { onUploaded: (fileId: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  async function onPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]; if (!file) return;
+    setBusy(true);
+    try {
+      const pres = await DisciplineAPI.presign(file.name, file.type || "application/octet-stream", file.size);
+      // local mode: pres.presigned.url is /api/content/local-upload/<key>
+      await fetch(pres.presigned.url, { method: pres.presigned.method, headers: pres.presigned.headers, body: file });
+      const committed = await DisciplineAPI.commit(pres.fileId, file.size);
+      onUploaded(committed.id || pres.fileId);
+    } finally { setBusy(false); e.target.value = ""; }
   }
-  return res.json();
+  return (
+    <label className="inline-flex items-center gap-2 cursor-pointer">
+      <input type="file" className="hidden" onChange={onPick} disabled={busy} />
+      <span className="border px-3 py-1 rounded">{busy ? "Téléversement..." : "Ajouter une pièce jointe"}</span>
+    </label>
+  );
 }
-1) Global Auth & Guards
-ts
-Copier le code
-// src/modules/auth/types.ts
-export interface Me {
-  user: { id: string; roles: string[] };
-  profile: { id: string; code?: string; firstName?: string; lastName?: string };
-}
-
-// src/modules/auth/api.ts
-import { http } from '@/lib/http';
-export const AuthAPI = { me: () => http<Me>('/me') };
-
-// src/modules/auth/hooks.ts
-import { useQuery } from '@tanstack/react-query';
-export function useMe() {
-  return useQuery({ queryKey: ['me'], queryFn: AuthAPI.me, staleTime: 60_000 });
-}
-
-// src/modules/auth/guards.tsx
-import { Navigate } from 'react-router-dom';
-export function RequireRoles({ roles, children }:{ roles: string[]; children: React.ReactNode }) {
-  // ADMIN should pass all guards for testing
-  const { data, isLoading } = useMe();
-  if (isLoading) return null;
-  const userRoles = data?.user.roles || [];
-  const ok = userRoles.includes('ADMIN') || roles.some(r => userRoles.includes(r));
-  return ok ? <>{children}</> : <Navigate to="/" replace />;
-}
-2) Shared API fragments (used across roles)
-ts
-Copier le code
-// src/modules/shared/api.ts
-import { http } from '@/lib/http';
-
-/** Content (Module 7) */
-export const ContentAPI = {
-  listNotes: (params: { limit?: number; cursor?: string|null; locale?: string } = {}) => {
-    const qs = new URLSearchParams({
-      limit: String(params.limit ?? 20),
-      audience: 'any',
-      ...(params.cursor ? { cursor: params.cursor } : {}),
-      ...(params.locale ? { locale: params.locale } : {})
-    });
-    return http<{ items: { id: string; title: string; publishedAt?: string|null; pinUntil?: string|null }[]; nextCursor?: string|null }>(`/content/notes?${qs}`);
-  },
-  getNote: (id: string, locale?: string) => http(`/content/notes/${id}${locale ? `?locale=${locale}`:''}`),
-  markRead: (id: string) => http(`/content/notes/${id}/read`, { method: 'POST', body: JSON.stringify({}) }),
-};
-
-/** Attendance (Module 5) */
-export const AttendanceAPI = {
-  sectionForDate: (sectionId: string, dateISO: string) => http(`/attendance/sections/${sectionId}?date=${encodeURIComponent(dateISO)}`),
-  markSection: (sectionId: string, payload: { date: string; marks: { studentProfileId: string; status: 'PRESENT'|'ABSENT'|'LATE'|'EXCUSED'|null; note?: string|null }[] }) =>
-    http(`/attendance/sections/${sectionId}/mark`, { method: 'POST', body: JSON.stringify(payload) }),
-  mySummary: (from: string, to: string) => http(`/attendance/me?from=${from}&to=${to}`), // student
-  studentSummary: (profileId: string, from: string, to: string) => http(`/attendance/students/${profileId}?from=${from}&to=${to}`), // guardian/staff
-};
-
-/** Academics (Module 2) */
-export const AcademicsAPI = {
-  myTimetable: (dateISO: string) => http(`/academics/timetable/me?date=${encodeURIComponent(dateISO)}`),
-  mySectionsTaught: () => http(`/teaching/assignments/me`), // teacher
-  mySections: () => http(`/enrollment/me/sections`),        // student
-  sectionRoster: (sectionId: string) => http(`/enrollment/sections/${sectionId}/students`),
-};
-
-/** Assessments (Module 8) */
-export const AssessAPI = {
-  available: () => http(`/assessments/quizzes/available`),
-  start: (quizId: string) => http(`/assessments/attempts/start`, { method: 'POST', body: JSON.stringify({ quizId }) }),
-  save: (attemptId: string, answers: { questionId: string; selectedOptionIds: string[] }[]) =>
-    http(`/assessments/attempts/${attemptId}/answers`, { method: 'POST', body: JSON.stringify({ answers }) }),
-  submit: (attemptId: string) => http(`/assessments/attempts/${attemptId}/submit`, { method: 'POST', body: JSON.stringify({}) }),
-  attempt: (attemptId: string) => http(`/assessments/attempts/${attemptId}`),
-  teacherSubmissions: (quizId: string) => http(`/assessments/teacher/quizzes/${quizId}/submissions`),
-};
-3) Role Workspaces (Routes & Pages)
-3.1 Teacher Workspace (recap)
-You already have this from module-teacher-client. Just ensure these routes exist:
-
-/teacher — Today panel + My sections
-
-/teacher/sections/:sectionId — Roster
-
-/teacher/sections/:sectionId/attendance?date=YYYY-MM-DD — Take attendance
-
-/teacher/notes/new?sectionId= — Compose note (Module 7)
-
-/teacher/assess/* — Question bank & quizzes (Module 8 Client)
-
-Guard with: <RequireRoles roles={['TEACHER','STAFF','ADMIN']}>…</RequireRoles>
-
-3.2 Student Portal
-Routes
-
-/student — Home (feed + timetable)
-
-/student/notes — Notes/Announcements feed
-
-/student/notes/:id — Note detail (signed attachments)
-
-/student/assess — Available quizzes (Module 8)
-
-/student/assess/attempt/:attemptId — Attempt player
-
-/student/attendance — My attendance summary
-
-Pages & Components
-
+4.2 Participants row (ID-based to start)
 tsx
 Copier le code
-// src/modules/student/pages/StudentHomePage.tsx
-import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { ContentAPI, AcademicsAPI } from '@/modules/shared/api';
-import { getLocale } from '@/lib/i18n';
+// src/modules/discipline/components/ParticipantRow.tsx
+export type Role = "PERPETRATOR"|"VICTIM"|"WITNESS";
 
-export default function StudentHomePage(){
-  const { data: notes } = useQuery({ queryKey: ['student','notes'], queryFn: () => ContentAPI.listNotes({ limit: 5, locale: getLocale() }) });
-  const { data: tt } = useQuery({ queryKey: ['student','timetable', new Date().toDateString()], queryFn: () => AcademicsAPI.myTimetable(new Date().toISOString().slice(0,10)) });
+export function ParticipantRow({ idx, value, onChange, onDelete }:{
+  idx:number;
+  value:{ profileId:string; role:Role; note?:string };
+  onChange:(v:any)=>void; onDelete:()=>void;
+}){
   return (
-    <div className="grid gap-6 md:grid-cols-2">
-      <section className="border rounded-2xl p-4">
-        <h3 className="font-semibold mb-2">Annonces récentes</h3>
-        <ul className="space-y-2">
-          {(notes?.items || []).map(n => (
-            <li key={n.id} className="flex items-center justify-between">
-              <Link className="text-blue-600 hover:underline" to={`/student/notes/${n.id}`}>{n.title}</Link>
-              <span className="text-xs opacity-70">{n.publishedAt && new Date(n.publishedAt).toLocaleDateString()}</span>
-            </li>
-          ))}
-          {!notes?.items?.length && <li className="text-sm opacity-70">Aucune annonce.</li>}
-        </ul>
-      </section>
-      <section className="border rounded-2xl p-4">
-        <h3 className="font-semibold mb-2">Cours aujourd’hui</h3>
-        <ul className="space-y-2">
-          {(tt?.items || []).map((c:any)=>(
-            <li key={`${c.sectionId}-${c.startsAt}`} className="flex items-center justify-between">
-              <span>{c.sectionName} — {c.subjectName}</span>
-              <span className="text-xs opacity-70">{new Date(c.startsAt).toLocaleTimeString()}–{new Date(c.endsAt).toLocaleTimeString()}</span>
-            </li>
-          ))}
-          {!tt?.items?.length && <li className="text-sm opacity-70">Pas de cours programmés.</li>}
-        </ul>
-      </section>
+    <div className="flex gap-2 items-center">
+      <input className="border rounded px-2 py-1 w-[22ch]" placeholder="profileId"
+             value={value.profileId} onChange={e=>onChange({ ...value, profileId: e.target.value })} />
+      <select className="border rounded px-2 py-1" value={value.role} onChange={e=>onChange({ ...value, role: e.target.value as Role })}>
+        <option value="PERPETRATOR">Auteur</option>
+        <option value="VICTIM">Victime</option>
+        <option value="WITNESS">Témoin</option>
+      </select>
+      <input className="border rounded px-2 py-1 flex-1" placeholder="note" value={value.note||""} onChange={e=>onChange({ ...value, note: e.target.value })}/>
+      <button type="button" className="text-red-600" onClick={onDelete}>Supprimer</button>
     </div>
   );
 }
+4.3 Incident Create/Edit Form
 tsx
 Copier le code
-// src/modules/student/pages/StudentNotesPage.tsx
-import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
-import { ContentAPI } from '@/modules/shared/api';
-import { getLocale } from '@/lib/i18n';
+// src/modules/discipline/components/IncidentForm.tsx
+import { useState } from "react";
+import { ParticipantRow } from "./ParticipantRow";
+import { FileUploaderM7 } from "./FileUploaderM7";
 
-export default function StudentNotesPage(){
-  const { data, isLoading } = useQuery({ queryKey: ['student','notes','all'], queryFn: () => ContentAPI.listNotes({ limit: 20, locale: getLocale() }) });
+export function IncidentForm({ onSubmit, loading }:{
+  onSubmit:(payload:any)=>void; loading?:boolean;
+}){
+  const [summary, setSummary] = useState("");
+  const [occurredAt, setOccurredAt] = useState(()=> new Date().toISOString().slice(0,16));
+  const [details, setDetails] = useState("");
+  const [location, setLocation] = useState("");
+  const [participants, setParticipants] = useState([{ profileId:"", role:"PERPETRATOR" as const }]);
+  const [attachments, setAttachments] = useState<string[]>([]);
+
   return (
-    <div className="space-y-3">
-      <h2 className="text-xl font-semibold">Annonces</h2>
-      {isLoading ? <p>Chargement…</p> : (
-        <ul className="divide-y rounded-2xl border">
-          {(data?.items || []).map(n => (
-            <li key={n.id} className="p-3 flex items-center justify-between">
-              <Link className="text-blue-600 hover:underline" to={`/student/notes/${n.id}`}>{n.title}</Link>
-              <span className="text-xs opacity-70">{n.publishedAt && new Date(n.publishedAt).toLocaleString()}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+    <form className="space-y-3" onSubmit={(e)=>{ e.preventDefault(); onSubmit({
+      summary, details, occurredAt: new Date(occurredAt).toISOString(), location,
+      participants, attachments
+    }) }}>
+      <div>
+        <label className="text-sm">Résumé</label>
+        <input className="border rounded w-full px-3 py-2" required value={summary} onChange={e=>setSummary(e.target.value)} />
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="text-sm">Date/Heure</label>
+          <input type="datetime-local" className="border rounded w-full px-3 py-2" value={occurredAt} onChange={e=>setOccurredAt(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-sm">Lieu</label>
+          <input className="border rounded w-full px-3 py-2" value={location} onChange={e=>setLocation(e.target.value)} />
+        </div>
+      </div>
+      <div>
+        <label className="text-sm">Détails</label>
+        <textarea className="border rounded w-full px-3 py-2 min-h-[120px]" value={details} onChange={e=>setDetails(e.target.value)} />
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <label className="text-sm font-medium">Participants</label>
+          <button type="button" className="text-blue-600" onClick={()=>setParticipants(p=>[...p, { profileId:"", role:"WITNESS" }])}>Ajouter</button>
+        </div>
+        {participants.map((p,idx)=>(
+          <ParticipantRow key={idx} idx={idx} value={p}
+            onChange={(v)=>setParticipants(arr => arr.map((x,i)=> i===idx ? v : x))}
+            onDelete={()=>setParticipants(arr => arr.filter((_,i)=>i!==idx))}
+          />
+        ))}
+      </div>
+      <div className="space-y-2">
+        <label className="text-sm font-medium">Pièces jointes</label>
+        <FileUploaderM7 onUploaded={(fid)=>setAttachments(a=>[...a, fid])} />
+        <ul className="text-xs opacity-70">{attachments.map(a=><li key={a}>{a}</li>)}</ul>
+      </div>
+      <div className="pt-2">
+        <button type="submit" disabled={loading} className="border rounded px-4 py-2">{loading ? "Envoi..." : "Créer l’incident"}</button>
+      </div>
+    </form>
+  );
+}
+4.4 Publish Visibility
+tsx
+Copier le code
+// src/modules/discipline/components/PublishVisibility.tsx
+export function PublishVisibility({ value, onChange }:{
+  value:"PRIVATE"|"STUDENT"|"GUARDIAN"; onChange:(v:any)=>void;
+}){
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-sm">Visibilité:</span>
+      <select className="border rounded px-2 py-1" value={value} onChange={e=>onChange(e.target.value)}>
+        <option value="PRIVATE">Privé</option>
+        <option value="STUDENT">Étudiant</option>
+        <option value="GUARDIAN">Parent</option>
+      </select>
     </div>
   );
 }
-
-// src/modules/student/pages/StudentNoteDetailPage.tsx
-import { useParams } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
-import { ContentAPI } from '@/modules/shared/api';
-import { getLocale } from '@/lib/i18n';
-import { Button } from '@/components/ui/button';
-
-export default function StudentNoteDetailPage(){
-  const { id } = useParams();
-  const { data, isLoading } = useQuery({ queryKey: ['student','note',id], queryFn: () => ContentAPI.getNote(id!, getLocale()) });
-  const mark = useMutation({ mutationFn: () => ContentAPI.markRead(id!) });
-  if (isLoading) return <p>Chargement…</p>;
-  if (!data) return <p>Introuvable.</p>;
-  return (
-    <article className="space-y-3">
-      <header className="flex items-center gap-2">
-        <h2 className="text-xl font-semibold">{data.translation?.title}</h2>
-        <span className="text-xs opacity-70 ml-auto">{data.publishedAt && new Date(data.publishedAt).toLocaleString()}</span>
-      </header>
-      {data.translation?.bodyMd && <pre className="border rounded-xl p-3 whitespace-pre-wrap">{data.translation.bodyMd}</pre>}
-      {data.attachments?.length ? (
-        <ul className="space-y-2">
-          {data.attachments.map((a:any)=>(
-            <li key={a.fileId}><a className="text-blue-600 hover:underline" href={a.url} target="_blank" rel="noreferrer">{a.filename} ({Math.round((a.sizeBytes||0)/1024)} KB)</a></li>
-          ))}
-        </ul>
-      ) : null}
-      <Button size="sm" onClick={()=>mark.mutate()} disabled={mark.isPending}>Marquer comme lu</Button>
-    </article>
-  );
-}
+4.5 Action Assign Dialog
 tsx
 Copier le code
-// src/modules/student/pages/StudentAssessPage.tsx
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { AssessAPI } from '@/modules/shared/api';
-import { Button } from '@/components/ui/button';
-import { useNavigate } from 'react-router-dom';
+// src/modules/discipline/components/ActionAssignDialog.tsx
+import { useState } from "react";
 
-export default function StudentAssessPage(){
-  const { data, isLoading } = useQuery({ queryKey: ['student','assess','available'], queryFn: AssessAPI.available });
-  const start = useMutation({ mutationFn: (quizId: string) => AssessAPI.start(quizId) });
-  const nav = useNavigate();
+export function ActionAssignDialog({ open, onClose, onSubmit }:{
+  open:boolean; onClose:()=>void; onSubmit:(payload:any)=>void;
+}){
+  const [profileId, setProfileId] = useState("");
+  const [type, setType] = useState("WARNING");
+  const [points, setPoints] = useState(0);
+  const [dueAt, setDueAt] = useState<string>("");
 
+  if (!open) return null;
   return (
-    <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Évaluations disponibles</h2>
-      {isLoading ? <p>Chargement…</p> : (
-        <ul className="space-y-2">
-          {(data?.items || []).map(q => (
-            <li key={q.id} className="border rounded-2xl p-3 flex items-center gap-2">
-              <div className="flex-1 text-sm">
-                <div className="font-medium">Quiz #{q.id.slice(0,8)}</div>
-                <div className="opacity-70">{q.openAt && new Date(q.openAt).toLocaleString()} → {q.closeAt && new Date(q.closeAt).toLocaleString()} · {q.timeLimitSec ? `${Math.round(q.timeLimitSec/60)} min` : '—'}</div>
-              </div>
-              <Button onClick={()=>start.mutate(q.id, { onSuccess: (r)=> nav(`/student/assess/attempt/${r.attemptId}`, { state: r }) })} disabled={q.attemptsRemaining<=0}>Commencer</Button>
-            </li>
-          ))}
-          {!data?.items?.length && <li className="text-sm opacity-70">Rien pour l’instant.</li>}
-        </ul>
-      )}
+    <div className="fixed inset-0 bg-black/30 grid place-items-center">
+      <div className="bg-white rounded-2xl p-4 w-full max-w-md space-y-3">
+        <h3 className="text-lg font-semibold">Assigner une action</h3>
+        <input className="border rounded w-full px-3 py-2" placeholder="student profileId" value={profileId} onChange={e=>setProfileId(e.target.value)} />
+        <div className="flex gap-2">
+          <select className="border rounded px-2 py-1" value={type} onChange={e=>setType(e.target.value)}>
+            <option value="WARNING">Avertissement</option>
+            <option value="DETENTION">Retenue</option>
+            <option value="SUSPENSION_IN_SCHOOL">Exclusion interne</option>
+            <option value="SUSPENSION_OUT_OF_SCHOOL">Exclusion externe</option>
+            <option value="PARENT_MEETING">Entretien parent</option>
+            <option value="COMMUNITY_SERVICE">Service</option>
+          </select>
+          <input type="number" className="border rounded px-2 py-1 w-[10ch]" value={points} onChange={e=>setPoints(parseInt(e.target.value||"0"))} />
+          <input type="datetime-local" className="border rounded px-2 py-1" value={dueAt} onChange={e=>setDueAt(e.target.value)} />
+        </div>
+        <div className="flex justify-end gap-2">
+          <button className="px-3 py-1 border rounded" onClick={onClose}>Annuler</button>
+          <button className="px-3 py-1 border rounded bg-slate-50" onClick={()=>{ onSubmit({ profileId, type, points, dueAt: dueAt ? new Date(dueAt).toISOString() : undefined }); onClose(); }}>Assigner</button>
+        </div>
+      </div>
     </div>
   );
 }
-Use the Attempt Player from Module 8 Client (/student/assess/attempt/:attemptId).
-
+4.6 Detention Forms
 tsx
 Copier le code
-// src/modules/student/pages/StudentAttendancePage.tsx
-import { useQuery } from '@tanstack/react-query';
-import { AttendanceAPI } from '@/modules/shared/api';
+// src/modules/discipline/components/DetentionForm.tsx
+import { useState } from "react";
 
-function range(days=30){
-  const end = new Date(); const start = new Date(); start.setDate(end.getDate()-days);
-  const fmt = (d:Date)=>d.toISOString().slice(0,10);
-  return { from: fmt(start), to: fmt(end) };
-}
-
-export default function StudentAttendancePage(){
-  const { from, to } = range(30);
-  const { data, isLoading } = useQuery({ queryKey: ['student','attendance',from,to], queryFn: () => AttendanceAPI.mySummary(from, to) });
-  const rows = (data as any[]) || [];
+export function DetentionForm({ onSubmit }:{ onSubmit:(payload:any)=>void }){
+  const [title, setTitle] = useState("");
+  const [dateTime, setDateTime] = useState(()=> new Date().toISOString().slice(0,16));
+  const [durationMinutes, setDur] = useState(60);
+  const [room, setRoom] = useState("");
+  const [capacity, setCap] = useState(20);
   return (
-    <div className="space-y-3">
-      <h2 className="text-xl font-semibold">Présences (30 jours)</h2>
-      {isLoading ? <p>Chargement…</p> : (
-        <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
-          <thead><tr className="text-left"><th className="p-2">Date</th><th className="p-2">Section</th><th className="p-2">Statut</th></tr></thead>
-          <tbody>
-            {rows.map((r:any)=>(
-              <tr key={r.date+'-'+r.classSectionId} className="border-t">
-                <td className="p-2">{r.date}</td>
-                <td className="p-2">{r.sectionName}</td>
-                <td className="p-2">{r.status}</td>
-              </tr>
+    <form className="grid md:grid-cols-5 gap-2 items-end" onSubmit={(e)=>{ e.preventDefault(); onSubmit({
+      title, dateTime: new Date(dateTime).toISOString(), durationMinutes, room: room||undefined, capacity
+    })}}>
+      <input className="border rounded px-2 py-1 md:col-span-2" placeholder="Titre" value={title} onChange={e=>setTitle(e.target.value)} />
+      <input type="datetime-local" className="border rounded px-2 py-1" value={dateTime} onChange={e=>setDateTime(e.target.value)} />
+      <input type="number" className="border rounded px-2 py-1 w-[12ch]" value={durationMinutes} onChange={e=>setDur(parseInt(e.target.value||"60"))} />
+      <div className="flex gap-2">
+        <input className="border rounded px-2 py-1 w-[12ch]" placeholder="Salle" value={room} onChange={e=>setRoom(e.target.value)} />
+        <input type="number" className="border rounded px-2 py-1 w-[10ch]" value={capacity} onChange={e=>setCap(parseInt(e.target.value||"20"))} />
+      </div>
+      <button className="border rounded px-3 py-1">Créer</button>
+    </form>
+  );
+}
+tsx
+Copier le code
+// src/modules/discipline/components/DetentionEnrollDrawer.tsx
+import { useState } from "react";
+
+export function DetentionEnrollDrawer({ open, onClose, onSubmit }:{
+  open:boolean; onClose:()=>void; onSubmit:(payload:{ actionId:string; studentProfileId:string })=>void;
+}){
+  const [actionId, setActionId] = useState("");
+  const [studentProfileId, setStudentProfileId] = useState("");
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 bg-black/20 flex justify-end">
+      <div className="bg-white w-full max-w-md h-full p-4 space-y-3">
+        <h3 className="text-lg font-semibold">Inscrire à la retenue</h3>
+        <input className="border rounded px-2 py-1 w-full" placeholder="actionId (DETENTION)" value={actionId} onChange={e=>setActionId(e.target.value)} />
+        <input className="border rounded px-2 py-1 w-full" placeholder="student profileId" value={studentProfileId} onChange={e=>setStudentProfileId(e.target.value)} />
+        <div className="flex gap-2">
+          <button className="border rounded px-3 py-1" onClick={onClose}>Fermer</button>
+          <button className="border rounded px-3 py-1 bg-slate-50" onClick={()=>{ onSubmit({ actionId, studentProfileId }); onClose(); }}>Inscrire</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+4.7 Incidents Table (TanStack Table)
+tsx
+Copier le code
+// src/modules/discipline/components/IncidentsTable.tsx
+import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
+
+export function IncidentsTable({ data }:{ data:any[] }){
+  const columns: ColumnDef<any>[] = [
+    { header: "Date", accessorKey: "occurredAt", cell: info => new Date(info.getValue<string>()).toLocaleString() },
+    { header: "Statut", accessorKey: "status" },
+    { header: "Résumé", accessorKey: "summary" },
+    { header: "Visibilité", accessorKey: "visibility" },
+  ];
+  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() });
+  return (
+    <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
+      <thead className="bg-slate-50">
+        {table.getHeaderGroups().map(hg=>(
+          <tr key={hg.id}>
+            {hg.headers.map(h=>(
+              <th key={h.id} className="p-2 text-left">{flexRender(h.column.columnDef.header, h.getContext())}</th>
             ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+          </tr>
+        ))}
+      </thead>
+      <tbody>
+        {table.getRowModel().rows.map(r=>(
+          <tr key={r.id} className="border-t">
+            {r.getVisibleCells().map(c=>(
+              <td key={c.id} className="p-2">{flexRender(c.column.columnDef.cell, c.getContext())}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
-Guard
-
+5) Pages
+5.1 Incidents List (Admin/Staff/Teacher)
 tsx
 Copier le code
-// routes
-{ path: '/student', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentHomePage/></RequireRoles> },
-{ path: '/student/notes', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentNotesPage/></RequireRoles> },
-{ path: '/student/notes/:id', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentNoteDetailPage/></RequireRoles> },
-{ path: '/student/assess', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentAssessPage/></RequireRoles> },
-{ path: '/student/assess/attempt/:attemptId', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><AttemptPlayerPage/></RequireRoles> },
-{ path: '/student/attendance', element: <RequireRoles roles={['STUDENT','ADMIN','STAFF','TEACHER']}><StudentAttendancePage/></RequireRoles> },
-3.3 Guardian/Parent Portal
-Routes
+// src/modules/discipline/pages/IncidentsListPage.tsx
+import { useState } from "react";
+import { useIncidentsList } from "../hooks";
+import { IncidentsTable } from "../components/IncidentsTable";
+import { Link } from "react-router-dom";
+import { useAuth } from "@/lib/auth";
 
-/guardian — Home (children cards)
-
-/guardian/notes — Notes for my children
-
-/guardian/notes/:id — Note detail
-
-/guardian/attendance — Select child → attendance summary
-
-/guardian/assess — Children quiz results (read-only list)
-
-API Assumptions
-
-GET /guardians/me/students → { children: { profileId, firstName, lastName, code }[] }
-
-Attendance & notes visibility leverage existing M3 links and M7/M8 checks.
-
-Pages
-
-tsx
-Copier le code
-// src/modules/guardian/pages/GuardianHomePage.tsx
-import { useQuery } from '@tanstack/react-query';
-import { http } from '@/lib/http';
-
-export default function GuardianHomePage(){
-  const { data, isLoading } = useQuery({ queryKey: ['guardian','children'], queryFn: () => http<{ children: any[] }>('/guardians/me/students') });
-  const kids = data?.children || [];
-  return (
-    <div className="space-y-3">
-      <h2 className="text-xl font-semibold">Mes enfants</h2>
-      {isLoading ? <p>Chargement…</p> : (
-        <ul className="grid gap-3 md:grid-cols-3">
-          {kids.map(k => (
-            <li key={k.profileId} className="border rounded-2xl p-3">
-              <div className="font-medium">{k.lastName} {k.firstName}</div>
-              <div className="text-xs opacity-70">{k.code}</div>
-            </li>
-          ))}
-          {!kids.length && <li className="text-sm opacity-70">Aucun enfant associé.</li>}
-        </ul>
-      )}
-    </div>
-  );
-}
-tsx
-Copier le code
-// src/modules/guardian/pages/GuardianAttendancePage.tsx
-import { useQuery } from '@tanstack/react-query';
-import { AttendanceAPI } from '@/modules/shared/api';
-import { useState } from 'react';
-import { http } from '@/lib/http';
-
-export default function GuardianAttendancePage(){
-  const { data } = useQuery({ queryKey: ['guardian','children'], queryFn: () => http<{ children: any[] }>('/guardians/me/students') });
-  const kids = data?.children || [];
-  const [kid, setKid] = useState<string | null>(kids[0]?.profileId || null);
-
-  function range(days=30){ const end=new Date(); const start=new Date(); start.setDate(end.getDate()-days); const fmt=(d:Date)=>d.toISOString().slice(0,10); return { from: fmt(start), to: fmt(end)}}
-  const { from, to } = range(30);
-
-  const q = useQuery({
-    queryKey: ['guardian','attendance',kid,from,to],
-    queryFn: () => AttendanceAPI.studentSummary(kid!, from, to),
-    enabled: !!kid
-  });
+export default function IncidentsListPage(){
+  const { hasRole } = useAuth();
+  const [status, setStatus] = useState<string>("");
+  const q = useIncidentsList({ status: status || undefined, limit: 50 });
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-xl font-semibold">Présences</h2>
-        <select className="ml-auto border rounded px-2 py-1" value={kid||''} onChange={e=>setKid(e.target.value)}>
-          {kids.map((k:any)=> <option key={k.profileId} value={k.profileId}>{k.lastName} {k.firstName}</option>)}
+        <h2 className="text-xl font-semibold">Incidents disciplinaires</h2>
+        {hasRole("ADMIN")||hasRole("STAFF")||hasRole("TEACHER") ? (
+          <Link to="/discipline/incidents/new" className="ml-auto border rounded px-3 py-1">Nouvel incident</Link>
+        ) : null}
+      </div>
+      <div className="flex items-center gap-2">
+        <select className="border rounded px-2 py-1" value={status} onChange={e=>setStatus(e.target.value)}>
+          <option value="">Tous</option>
+          <option value="OPEN">Ouverts</option>
+          <option value="UNDER_REVIEW">En examen</option>
+          <option value="RESOLVED">Résolus</option>
+          <option value="CANCELLED">Annulés</option>
         </select>
       </div>
-      {q.isLoading ? <p>Chargement…</p> : (
-        <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
-          <thead><tr className="text-left"><th className="p-2">Date</th><th className="p-2">Classe</th><th className="p-2">Statut</th></tr></thead>
-          <tbody>
-            {(q.data as any[]||[]).map((r:any)=>(
-              <tr key={r.date+'-'+r.classSectionId} className="border-t">
-                <td className="p-2">{r.date}</td>
-                <td className="p-2">{r.sectionName}</td>
-                <td className="p-2">{r.status}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      <IncidentsTable data={q.data?.items || []} />
     </div>
   );
 }
-For guardian Notes and Assessments, reuse Student note detail and a simple list of submissions, filtered per child if you expose endpoints like /guardians/me/assess/submissions.
-
-Guard
-
+5.2 Create Incident
 tsx
 Copier le code
-{ path: '/guardian', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><GuardianHomePage/></RequireRoles> },
-{ path: '/guardian/attendance', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><GuardianAttendancePage/></RequireRoles> },
-{ path: '/guardian/notes', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><StudentNotesPage/></RequireRoles> },
-{ path: '/guardian/notes/:id', element: <RequireRoles roles={['GUARDIAN','ADMIN','STAFF']}><StudentNoteDetailPage/></RequireRoles> },
-3.4 Staff Workspace (Registrar/Operations)
-Scope
+// src/modules/discipline/pages/IncidentCreatePage.tsx
+import { useNavigate } from "react-router-dom";
+import { IncidentForm } from "../components/IncidentForm";
+import { useCreateIncident } from "../hooks";
 
-Enrollment ops: manage students in sections, guardians links.
-
-Attendance supervision: edit/override marks.
-
-Content broadcast: post announcements school-wide (optional; share Teacher note form but with wider audience).
-
-Reports: CSV exports (attendance by date range, note reads).
-
-Routes
-
-/staff — Home (quick links)
-
-/staff/enrollment — Find student & assign/unassign sections
-
-/staff/guardians — Link guardian ↔ student
-
-/staff/attendance — Search and edit attendance by section/date
-
-/staff/reports — Download CSVs
-
-API Assumptions
-
-Enrollment:
-
-GET /enrollment/search?query= → students list
-
-GET /enrollment/students/:profileId/sections
-
-POST /enrollment/students/:profileId/sections { add: [sectionId], remove: [sectionId] }
-
-Guardians:
-
-GET /guardians/search?query= → guardians list
-
-POST /guardians/link { guardianProfileId, studentProfileId }
-
-POST /guardians/unlink { guardianProfileId, studentProfileId }
-
-Attendance editing:
-
-GET /attendance/sections/:sectionId?date=YYYY-MM-DD
-
-POST /attendance/sections/:sectionId/mark (same payload as teacher)
-
-Pages (essential stubs)
-
-tsx
-Copier le code
-// src/modules/staff/pages/StaffHomePage.tsx
-import { Link } from 'react-router-dom';
-export default function StaffHomePage(){
+export default function IncidentCreatePage(){
+  const nav = useNavigate();
+  const m = useCreateIncident();
   return (
-    <div className="grid gap-3 md:grid-cols-3">
-      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/enrollment">Inscription / Affectations</Link>
-      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/guardians">Liens Parents</Link>
-      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/attendance">Présences (édition)</Link>
-      <Link className="border rounded-2xl p-4 hover:bg-gray-50" to="/staff/reports">Rapports</Link>
+    <div className="space-y-3 max-w-3xl">
+      <h2 className="text-xl font-semibold">Créer un incident</h2>
+      <IncidentForm loading={m.isPending} onSubmit={async (payload)=>{
+        const row = await m.mutateAsync(payload);
+        nav(`/discipline/incidents/${row.id}`);
+      }} />
     </div>
   );
 }
+5.3 Incident Detail (with actions, visibility)
 tsx
 Copier le code
-// src/modules/staff/pages/StaffEnrollmentPage.tsx
-import { useState } from 'react';
-import { http } from '@/lib/http';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+// src/modules/discipline/pages/IncidentDetailPage.tsx
+import { useParams } from "react-router-dom";
+import { useIncident, useAddAction, usePublishIncident, useUpdateIncident } from "../hooks";
+import { useState } from "react";
+import { ActionAssignDialog } from "../components/ActionAssignDialog";
+import { PublishVisibility } from "../components/PublishVisibility";
+import { useAuth } from "@/lib/auth";
 
-export default function StaffEnrollmentPage(){
-  const [q, setQ] = useState('');
-  const search = useQuery({ queryKey: ['staff','enroll','search',q], queryFn: () => http(`/enrollment/search?query=${encodeURIComponent(q)}`), enabled: q.length>=2 });
-  const [selected, setSelected] = useState<any|null>(null);
-  const sec = useQuery({ queryKey: ['staff','enroll','sections', selected?.profileId], queryFn: () => http(`/enrollment/students/${selected?.profileId}/sections`), enabled: !!selected });
+export default function IncidentDetailPage(){
+  const { id="" } = useParams();
+  const { data } = useIncident(id);
+  const addAction = useAddAction(id);
+  const publish = usePublishIncident(id);
+  const update = useUpdateIncident(id);
+  const { hasRole, profileId } = useAuth();
 
-  const qc = useQueryClient();
-  const save = useMutation({
-    mutationFn: (body: { add: string[]; remove: string[] }) => http(`/enrollment/students/${selected.profileId}/sections`, { method:'POST', body: JSON.stringify(body) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['staff','enroll','sections', selected?.profileId] })
-  });
+  const [openAssign, setOpenAssign] = useState(false);
+  const canEdit = hasRole("ADMIN") || hasRole("STAFF") || (data?.incident?.reportedByProfileId === profileId);
+
+  if (!data) return null;
+  const inc = data.incident as any;
 
   return (
     <div className="space-y-3">
-      <h2 className="text-xl font-semibold">Inscription / Affectations</h2>
-      <input className="border rounded px-3 py-2 w-full" placeholder="Rechercher un élève…" value={q} onChange={e=>setQ(e.target.value)} />
-      <div className="grid gap-3 md:grid-cols-2">
-        <section className="border rounded-2xl p-3">
-          <h3 className="font-semibold mb-2">Résultats</h3>
-          <ul className="space-y-2">
-            {(search.data?.items || []).map((s:any)=>(
-              <li key={s.profileId} className="flex items-center justify-between">
-                <button className="text-blue-600 hover:underline" onClick={()=>setSelected(s)}>{s.lastName} {s.firstName} — {s.code}</button>
+      <div className="flex items-center gap-2">
+        <h2 className="text-xl font-semibold">{inc.summary}</h2>
+        <span className="text-xs px-2 py-0.5 rounded border">{inc.status}</span>
+        <div className="ml-auto" />
+        {canEdit && (
+          <PublishVisibility value={inc.visibility} onChange={(v)=>publish.mutate(v)} />
+        )}
+      </div>
+
+      <div className="grid md:grid-cols-3 gap-3">
+        <div className="md:col-span-2 border rounded-2xl p-3">
+          <div className="text-sm opacity-70">{new Date(inc.occurredAt).toLocaleString()} · {inc.location || "—"}</div>
+          <p className="mt-2 whitespace-pre-wrap">{inc.details || "—"}</p>
+          <div className="mt-3">
+            <h3 className="font-semibold">Participants</h3>
+            <ul className="list-disc pl-6 text-sm">
+              {data.participants.map((p:any)=>(
+                <li key={p.profileId+p.role}>{p.role} — {p.profileId.slice(0,8)}{p.note ? ` · ${p.note}`: ""}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+        <div className="border rounded-2xl p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold">Actions</h3>
+            {(hasRole("ADMIN")||hasRole("STAFF")||hasRole("TEACHER")) && (
+              <button className="border rounded px-2 py-1 text-xs" onClick={()=>setOpenAssign(true)}>Assigner</button>
+            )}
+          </div>
+          <ul className="text-sm space-y-1">
+            {data.actions.map((a:any)=>(
+              <li key={a.id} className="border rounded px-2 py-1">
+                <div className="flex items-center justify-between">
+                  <span>{a.type} · {a.points} pts · {a.profileId.slice(0,8)}</span>
+                  <span className="text-xs opacity-70">{a.completedAt ? "Terminé" : "En cours"}</span>
+                </div>
+                {a.comment && <div className="text-xs opacity-70">{a.comment}</div>}
               </li>
             ))}
           </ul>
-        </section>
-        <section className="border rounded-2xl p-3">
-          <h3 className="font-semibold mb-2">Sections de {selected ? `${selected.lastName} ${selected.firstName}` : '—'}</h3>
-          {!selected ? <p className="opacity-70 text-sm">Sélectionnez un élève.</p> : (
-            <>
-              <ul className="space-y-1">
-                {(sec.data?.sections || []).map((r:any)=>(
-                  <li key={r.id} className="flex items-center justify-between">
-                    <span>{r.name}</span>
-                    <button className="text-red-600" onClick={()=>save.mutate({ add:[], remove:[r.id] })}>Retirer</button>
-                  </li>
-                ))}
-              </ul>
-              <div className="mt-3">
-                <input className="border rounded px-2 py-1" placeholder="Ajouter sectionId" onKeyDown={(e:any)=>{ if(e.key==='Enter'){ save.mutate({ add:[e.currentTarget.value], remove:[] }); e.currentTarget.value=''; }}} />
-              </div>
-            </>
-          )}
-        </section>
+        </div>
       </div>
+
+      <ActionAssignDialog open={openAssign} onClose={()=>setOpenAssign(false)}
+        onSubmit={(payload)=>addAction.mutate(payload)} />
     </div>
   );
 }
+5.4 Detention Sessions (list/create/enroll/attendance)
 tsx
 Copier le code
-// src/modules/staff/pages/StaffAttendanceEditPage.tsx
-import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { AttendanceAPI } from '@/modules/shared/api';
+// src/modules/discipline/pages/DetentionSessionsPage.tsx
+import { useDetentions } from "../hooks";
+import { DetentionForm } from "../components/DetentionForm";
+import { DisciplineAPI } from "../api";
+import { useState } from "react";
+import { DetentionEnrollDrawer } from "../components/DetentionEnrollDrawer";
 
-export default function StaffAttendanceEditPage(){
-  const [sectionId, setSectionId] = useState('');
-  const [date, setDate] = useState(new Date().toISOString().slice(0,10));
-  const q = useQuery({ queryKey: ['staff','att',sectionId,date], queryFn: ()=>AttendanceAPI.sectionForDate(sectionId, date), enabled: !!sectionId && !!date });
-  const qc = useQueryClient();
-  const save = useMutation({
-    mutationFn: (payload:any)=>AttendanceAPI.markSection(sectionId, payload),
-    onSuccess: (_,_vars)=> qc.invalidateQueries({ queryKey: ['staff','att',sectionId,date] })
-  });
+export default function DetentionSessionsPage(){
+  const q = useDetentions();
+  const [openEnroll, setOpenEnroll] = useState<string | null>(null);
 
-  const rows = new Map<string,{ studentProfileId: string; status: any; note?: string }>();
-  (q.data?.rows||[]).forEach((r:any)=>rows.set(r.studentProfileId, r));
-
-  function setStatus(id:string, s:any){ rows.set(id, { studentProfileId:id, status: s }); }
-  function submit(){ save.mutate({ date, marks: Array.from(rows.values()) }); }
+  async function onCreate(payload:any){
+    await DisciplineAPI.createDetention(payload);
+    await q.refetch();
+  }
+  async function onEnroll(sessionId:string, d:{ actionId:string; studentProfileId:string }){
+    await DisciplineAPI.enrollDetention(sessionId, { sessionId, ...d });
+    await q.refetch();
+  }
+  async function onToggle(sessionId:string, studentProfileId:string, present:boolean){
+    await DisciplineAPI.markDetentionAttendance(sessionId, studentProfileId, present);
+  }
 
   return (
     <div className="space-y-3">
-      <h2 className="text-xl font-semibold">Présences — Édition</h2>
-      <div className="flex gap-2">
-        <input className="border rounded px-2 py-1" placeholder="sectionId" value={sectionId} onChange={e=>setSectionId(e.target.value)} />
-        <input className="border rounded px-2 py-1" type="date" value={date} onChange={e=>setDate(e.target.value)} />
-        <button className="border rounded px-3" onClick={()=>submit()}>Enregistrer</button>
+      <h2 className="text-xl font-semibold">Séances de retenue</h2>
+      <DetentionForm onSubmit={onCreate} />
+      <div className="grid gap-3">
+        {(q.data?.items || []).map((s:any)=>(
+          <div key={s.id} className="border rounded-2xl p-3">
+            <div className="flex items-center gap-2">
+              <div className="font-semibold">{s.title}</div>
+              <div className="text-sm opacity-70">{new Date(s.dateTime).toLocaleString()} · Salle {s.room || "—"} · Capacité {s.capacity}</div>
+              <button className="ml-auto border rounded px-2 py-1 text-xs" onClick={()=>setOpenEnroll(s.id)}>Inscrire</button>
+            </div>
+            <div className="text-xs opacity-70">Enregistrements visibles après rechargement</div>
+            {openEnroll===s.id && (
+              <DetentionEnrollDrawer open onClose={()=>setOpenEnroll(null)} onSubmit={(d)=>onEnroll(s.id, d)} />
+            )}
+          </div>
+        ))}
       </div>
-      {q.isLoading ? <p>Chargement…</p> : (
-        <table className="min-w-full text-sm border rounded-2xl overflow-hidden">
-          <thead><tr><th className="p-2 text-left">Élève</th><th className="p-2">Présent</th><th className="p-2">Absent</th><th className="p-2">Retard</th><th className="p-2">Justifié</th></tr></thead>
-          <tbody>
-            {(q.data?.rows||[]).map((r:any)=>(
-              <tr key={r.studentProfileId} className="border-t">
-                <td className="p-2">{r.studentName || r.studentProfileId.slice(0,8)}</td>
-                {['PRESENT','ABSENT','LATE','EXCUSED'].map(s=>(
-                  <td key={s} className="p-2 text-center">
-                    <input type="radio" name={`r-${r.studentProfileId}`} defaultChecked={r.status===s} onChange={()=>setStatus(r.studentProfileId, s)} />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </div>
   );
 }
-Guard
-
+5.5 Student View — My Record
 tsx
 Copier le code
-{ path: '/staff', element: <RequireRoles roles={['STAFF','ADMIN']}><StaffHomePage/></RequireRoles> },
-{ path: '/staff/enrollment', element: <RequireRoles roles={['STAFF','ADMIN']}><StaffEnrollmentPage/></RequireRoles> },
-{ path: '/staff/guardians', element: <RequireRoles roles={['STAFF','ADMIN']}><div>TODO link/unlink UI</div></RequireRoles> },
-{ path: '/staff/attendance', element: <RequireRoles roles={['STAFF','ADMIN']}><StaffAttendanceEditPage/></RequireRoles> },
-{ path: '/staff/reports', element: <RequireRoles roles={['STAFF','ADMIN']}><div>TODO CSV exports</div></RequireRoles> },
-4) Navigation (role-aware)
-Show left menu items based on roles from useMe(); Admin sees everything.
+// src/modules/discipline/pages/MyDisciplinePage.tsx
+import { useMyRecord } from "../hooks";
 
-tsx
-Copier le code
-// src/components/RoleNav.tsx
-import { Link } from 'react-router-dom';
-import { useMe } from '@/modules/auth/hooks';
+export default function MyDisciplinePage(){
+  const q = useMyRecord();
+  const items = q.data?.items || [];
+  const points = q.data?.points || 0;
 
-export function RoleNav(){
-  const { data } = useMe();
-  const roles = new Set(data?.user.roles || []);
   return (
-    <nav className="space-y-1">
-      {roles.has('TEACHER') || roles.has('ADMIN') || roles.has('STAFF') ? (
-        <>
-          <div className="px-2 text-xs uppercase opacity-60">Enseignant</div>
-          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/teacher">Espace Enseignant</Link>
-        </>
-      ):null}
-      {roles.has('STUDENT') || roles.has('ADMIN') || roles.has('TEACHER') || roles.has('STAFF') ? (
-        <>
-          <div className="px-2 text-xs uppercase opacity-60">Élève</div>
-          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/student">Accueil élève</Link>
-        </>
-      ):null}
-      {roles.has('GUARDIAN') || roles.has('ADMIN') || roles.has('STAFF') ? (
-        <>
-          <div className="px-2 text-xs uppercase opacity-60">Parent</div>
-          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/guardian">Espace Parent</Link>
-        </>
-      ):null}
-      {roles.has('STAFF') || roles.has('ADMIN') ? (
-        <>
-          <div className="px-2 text-xs uppercase opacity-60">Personnel</div>
-          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/staff">Espace Personnel</Link>
-        </>
-      ):null}
-    </nav>
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Mes incidents disciplinaires</h2>
+      <div className="text-sm">Total points: <span className="font-semibold">{points}</span></div>
+      <div className="space-y-2">
+        {items.map((i:any)=>(
+          <div key={i.id} className="border rounded-2xl p-3">
+            <div className="flex items-center gap-2">
+              <div className="font-medium">{i.summary}</div>
+              <div className="text-xs px-2 py-0.5 rounded border">{i.status}</div>
+              <div className="ml-auto text-xs opacity-70">{new Date(i.occurredAt).toLocaleString()}</div>
+            </div>
+            <div className="text-sm opacity-80 mt-1">{i.details || "—"}</div>
+          </div>
+        ))}
+        {!items.length && <div className="text-sm opacity-60">Aucun incident publié.</div>}
+      </div>
+    </div>
   );
 }
-5) i18n Keys (merge into global dictionary)
+5.6 Guardian View — Child Record
+tsx
+Copier le code
+// src/modules/discipline/pages/GuardianChildRecordPage.tsx
+import { useParams } from "react-router-dom";
+import { useGuardianChildRecord } from "../hooks";
+
+export default function GuardianChildRecordPage(){
+  const { studentId="" } = useParams();
+  const q = useGuardianChildRecord(studentId);
+  const items = q.data?.items || [];
+  const points = q.data?.points || 0;
+
+  return (
+    <div className="space-y-3">
+      <h2 className="text-xl font-semibold">Discipline — élève {studentId.slice(0,8)}</h2>
+      <div className="text-sm">Total points: <span className="font-semibold">{points}</span></div>
+      <div className="space-y-2">
+        {items.map((i:any)=>(
+          <div key={i.id} className="border rounded-2xl p-3">
+            <div className="flex items-center gap-2">
+              <div className="font-medium">{i.summary}</div>
+              <div className="text-xs px-2 py-0.5 rounded border">{i.status}</div>
+              <div className="ml-auto text-xs opacity-70">{new Date(i.occurredAt).toLocaleString()}</div>
+            </div>
+            <div className="text-sm opacity-80 mt-1">{i.details || "—"}</div>
+          </div>
+        ))}
+        {!items.length && <div className="text-sm opacity-60">Aucun incident publié pour ce compte.</div>}
+      </div>
+    </div>
+  );
+}
+6) Routes (mount into app)
+tsx
+Copier le code
+// src/router/routes.discipline.tsx
+import { RouteObject } from "react-router-dom";
+import IncidentsListPage from "@/modules/discipline/pages/IncidentsListPage";
+import IncidentCreatePage from "@/modules/discipline/pages/IncidentCreatePage";
+import IncidentDetailPage from "@/modules/discipline/pages/IncidentDetailPage";
+import DetentionSessionsPage from "@/modules/discipline/pages/DetentionSessionsPage";
+import MyDisciplinePage from "@/modules/discipline/pages/MyDisciplinePage";
+import GuardianChildRecordPage from "@/modules/discipline/pages/GuardianChildRecordPage";
+
+export const disciplineRoutes: RouteObject[] = [
+  { path: "/discipline/incidents", element: <IncidentsListPage /> },
+  { path: "/discipline/incidents/new", element: <IncidentCreatePage /> },
+  { path: "/discipline/incidents/:id", element: <IncidentDetailPage /> },
+  { path: "/discipline/detention", element: <DetentionSessionsPage /> },
+  { path: "/discipline/me", element: <MyDisciplinePage /> },
+  { path: "/discipline/guardian/:studentId", element: <GuardianChildRecordPage /> },
+];
+Add to root router:
+
+tsx
+Copier le code
+// src/router/index.tsx (excerpt)
+import { disciplineRoutes } from "./routes.discipline";
+const routes: RouteObject[] = [
+  // ...
+  ...disciplineRoutes,
+];
+Add to sidebar/menu:
+
+Discipline
+
+Incidents
+
+Détention
+
+(Students) Mon Dossier
+
+(Guardians) Dossier de l’enfant (with a student selector you already use)
+
+Use RBAC to conditionally show menu items.
+
+7) i18n Strings (example)
 ts
 Copier le code
-// src/i18n/roles.ts
-export const rolesI18n = {
+// src/modules/discipline/i18n.ts
+export const dict = {
   fr: {
-    common: { loading:'Chargement…', save:'Enregistrer', back:'Retour' },
-    teacher: { title:'Espace Enseignant', attendance:'Appel', note:'Publier une note', quiz:'Quiz' },
-    student: { title:'Accueil élève', notes:'Annonces', assess:'Évaluations', attendance:'Présences', timetable:'Emploi du temps' },
-    guardian: { title:'Espace Parent', children:'Mes enfants', attendance:'Présences' },
-    staff: { title:'Espace Personnel', enrollment:'Inscription', guardians:'Liens Parents', attendance:'Présences', reports:'Rapports' },
+    discipline: {
+      title: "Discipline",
+      incidents: "Incidents",
+      newIncident: "Nouvel incident",
+      detention: "Séances de retenue",
+      myRecord: "Mon dossier",
+      visibility: { PRIVATE: "Privé", STUDENT: "Étudiant", GUARDIAN: "Parent" },
+      roles: { PERPETRATOR: "Auteur", VICTIM: "Victime", WITNESS: "Témoin" },
+      status: { OPEN:"Ouvert", UNDER_REVIEW:"En examen", RESOLVED:"Résolu", CANCELLED:"Annulé" }
+    }
   },
-  en: {
-    common: { loading:'Loading…', save:'Save', back:'Back' },
-    teacher: { title:'Teacher Workspace', attendance:'Attendance', note:'Post note', quiz:'Quiz' },
-    student: { title:'Student Home', notes:'Announcements', assess:'Assessments', attendance:'Attendance', timetable:'Timetable' },
-    guardian: { title:'Parent Portal', children:'My children', attendance:'Attendance' },
-    staff: { title:'Staff Workspace', enrollment:'Enrollment', guardians:'Guardian Links', attendance:'Attendance', reports:'Reports' },
-  },
-  ar: {
-    common: { loading:'جاري التحميل…', save:'حفظ', back:'رجوع' },
-    teacher: { title:'مساحة المعلم', attendance:'الغياب', note:'نشر ملاحظة', quiz:'اختبار' },
-    student: { title:'واجهة الطالب', notes:'الإعلانات', assess:'الاختبارات', attendance:'الحضور', timetable:'الجدول' },
-    guardian: { title:'واجهة ولي الأمر', children:'أطفالي', attendance:'الحضور' },
-    staff: { title:'واجهة الموظفين', enrollment:'التسجيل', guardians:'ربط الأولياء', attendance:'الحضور', reports:'تقارير' },
-  },
+  en: { /* ... */ },
+  ar: { /* ... (RTL styles if you apply) */ }
 };
-Ensure <html dir={isRTL(locale)?'rtl':'ltr'} lang={locale}>.
+8) End-to-End Flows (no placeholder data)
+8.1 Create & Publish an Incident
+Navigate Discipline → Incidents → Nouvel incident.
 
-6) Accessibility & UX Notes
-Use semantic <button>, <label>, <input> and visible focus states.
+Fill Résumé, Date/Heure, add Participants by valid profileId (copy from your user/profile admin pages), optionally Pièces jointes (Module 7 upload).
 
-For Arabic, test table visual order and alignment (use rtl: Tailwind utilities).
+Submit. You are redirected to detail page.
 
-Show server errors near action buttons; prefer toast for background failures.
+(Optional) Assign Action (e.g., DETENTION with points).
 
-Disable “Change password” for non-admin users (per requirement).
+Change Visibilité to STUDENT or GUARDIAN as appropriate.
 
-7) Manual End-to-End Tests
-Teacher
+8.2 Create Detention & Enroll
+Go to Discipline → Séances de retenue.
 
-Open /teacher, see today’s classes.
+Create a session.
 
-Take attendance in one section; refresh → persisted.
+Click Inscrire, enter a valid detention actionId and student profileId.
 
-Publish a note to a class; confirm success.
+Mark attendance when the session occurs → the detention action auto-completes (server logic).
 
-Student (enrolled in that section)
+8.3 Student/Guardian Views
+Student: open /discipline/me to see published incidents & points.
 
-/student/notes shows the new note; open and download attachment.
+Guardian: open /discipline/guardian/:studentId to see the child’s GUARDIAN-published incidents.
 
-/student/assess lists an open quiz; start, answer, submit → score shown.
+9) Definition of Done (Client)
+ Routes & pages mounted; menu visible to intended roles.
 
-/student/attendance shows recent marks.
+ Incidents list with server-backed filtering (status).
 
-Guardian (linked to the student)
+ Create incident form (participants, attachments, details) posting to server; redirect to detail.
 
-/guardian shows child; /guardian/attendance displays last 30 days.
+ Incident detail shows participants, actions, and allows:
 
-/guardian/notes shows the note audience to class/grade.
+ Assigning actions (ADMIN/STAFF/TEACHER).
 
-Staff
+ Changing visibility (ADMIN/STAFF or reporter).
 
-/staff/enrollment search student → add/remove a section → verify in roster.
+ Detention sessions page:
 
-/staff/attendance adjust a mark for a date; teacher/student views reflect change.
+ Create session
 
-8) Definition of Done (Client Multi-Role)
- RBAC guards in place; Admin bypasses for QA.
+ Enroll with valid DETENTION actionId + student
 
- Teacher workspace operational (attendance, roster, notes, assessments).
+ Mark attendance → updates server
 
- Student portal operational (feed, note detail w/ attachments, timetable, assessments, attendance summary).
+ Student (/discipline/me) & Guardian (/discipline/guardian/:studentId) read-only views wired to server.
 
- Guardian portal operational (children list, attendance per child, feed).
+ Attachments upload via Module 7 local storage (presign → upload → commit) with file IDs shown and used in incidents.
 
- Staff workspace operational (enrollment screen, attendance edit; guardians & reports stubs ready).
+ i18n keys present (fr primary).
 
- All fetches send Accept-Language and render correctly in fr/en/ar; RTL applied for ar.
+ No placeholder data: all actions use real IDs from your DB.
 
- No password self-service surfaced for non-admin users.
+10) Notes & Next Steps
+Replace raw profileId fields with your People Picker once available (e.g., search by code like S434942).
 
- Error states and loading states handled; minimal empty states included.
+Add filters in the incidents table (status, reporter = me, student).
 
-9) Future Enhancements
-Offline cache/queue for Teacher attendance (Background sync).
+Add CSV export for discipline logs (server small endpoint; client download button).
 
-Global search (students/sections/users) with a thin API.
+Display attachments with download links (via Module 7 /files/:id/download returning signed URL).
 
-CSV export pages (attendance, submissions) using client-side generation from API datasets.
-
-Rich Markdown rendering (sanitized) for notes and question text.
-
-Notification badges for unread notes and pending quizzes.
-
-“Switch Role” control for multi-role users (teacher+guardian).
+If you use RTL for Arabic, apply dir="rtl" at page root when locale === 'ar'.

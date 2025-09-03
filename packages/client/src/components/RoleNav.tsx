@@ -18,6 +18,31 @@ export function RoleNav(){
           <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/student">Accueil élève</Link>
         </>
       ):null}
+      {/* Finance */}
+      {(roles.has('ADMIN') || roles.has('STAFF')) && (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Finance</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/fees/schedules">Barèmes</Link>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/fees/assign">Affectations</Link>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/invoices">Factures</Link>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/payments">Paiements</Link>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/advances/admin">Avances (admin)</Link>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/payroll">Paie</Link>
+        </>
+      )}
+      {(roles.has('STUDENT') || roles.has('GUARDIAN')) && (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Finance</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/me/invoices">Mes factures</Link>
+        </>
+      )}
+      {(roles.has('STAFF') || roles.has('TEACHER')) && (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Finance</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/advances">Avances</Link>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/finance/me/payslips">Mes fiches de paie</Link>
+        </>
+      )}
       {roles.has('GUARDIAN') || roles.has('ADMIN') || roles.has('STAFF') ? (
         <>
           <div className="px-2 text-xs uppercase opacity-60">Parent</div>
@@ -33,3 +58,21 @@ export function RoleNav(){
     </nav>
   );
 }
+      {(roles.has('ADMIN') || roles.has('STAFF') || roles.has('TEACHER')) && (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Discipline</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/discipline/incidents">Incidents</Link>
+          {(roles.has('ADMIN') || roles.has('STAFF')) && (
+            <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/discipline/categories">Catégories</Link>
+          )}
+          {(roles.has('ADMIN') || roles.has('STAFF')) && (
+            <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/discipline/detention">Séances de retenue</Link>
+          )}
+        </>
+      )}
+      {(roles.has('STUDENT') || roles.has('GUARDIAN')) && (
+        <>
+          <div className="px-2 text-xs uppercase opacity-60">Discipline</div>
+          <Link className="block px-3 py-2 rounded hover:bg-gray-50" to="/discipline/me">Mon dossier</Link>
+        </>
+      )}

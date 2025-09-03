@@ -16,6 +16,11 @@ export * from './schema/teaching.ts';
 export * from './schema/attendance.ts';
 export * from './schema/content.ts';
 export * from './schema/assess.ts';
+export * from './schema/timetable.ts';
+export * from './schema/messages.ts';
+export * from './schema/discipline.enums.ts';
+export * from './schema/discipline.ts';
+export * from './schema/finance.ts';
 
 export const users = pgTable('users', {
    id: serial('id').primaryKey(),

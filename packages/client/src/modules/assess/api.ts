@@ -2,7 +2,7 @@ import { get, post, patch } from '@/lib/api';
 import type { AvailableQuiz, CreateQuizDto, StartAttemptResponse, SubmissionSummary, UpdateQuizDto, UpsertQuestionDto, AttemptContent, QuestionSummary } from './types';
 
 // Base path for server assessments routes
-const base = '/assessments';
+const base = 'assessments';
 
 // Student-facing APIs
 export async function listAvailableQuizzes(): Promise<AvailableQuiz[]> {
@@ -63,4 +63,8 @@ export async function finishAttempt(attemptId: string) {
 
 export async function submitAttempt(attemptId: string) {
   return post(`${base}/attempts/${attemptId}/submit`, {});
+}
+
+export async function listMyQuizzes(): Promise<{ id: string; title?: string|null; status: string; openAt?: string|null; closeAt?: string|null; timeLimitSec?: number|null }[]> {
+  return get(`${base}/teacher/quizzes`);
 }

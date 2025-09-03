@@ -8,13 +8,14 @@ import {
 } from '../../db/schema';
 import { and, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { validate } from '../../middlewares/validate';
-import { requireAuth, requireStaffOrAdmin } from '../../middlewares/rbac';
+import { requireAuth, requireStaffOrAdmin, requireTeacherOrStaff } from '../../middlewares/rbac';
 import { writeAudit, actorFromReq } from '../admin-utils/audit.service';
 import {
   UpsertQuestionDto, CreateQuizDto, UpdateQuizDto, PublishDto, StartAttemptDto, SubmitAnswersDto, ListAvailableQuery,
 } from './dto';
 import { enrollment } from '../../db/schema';
 import { classSection, classSectionSubject } from '../../db/schema';
+import { teachingAssignment } from '../../db/schema/teaching';
 
 const router = express.Router();
 
@@ -62,6 +63,24 @@ async function attemptsRemaining(quizId: string, studentProfileId: string, maxAt
   return Math.max(0, (maxAttempts ?? 1) - used);
 }
 
+async function teacherScope(profileId: string) {
+  const assigns = await db.select({
+    classSectionId: teachingAssignment.classSectionId,
+    subjectId: teachingAssignment.subjectId,
+  }).from(teachingAssignment).where(eq(teachingAssignment.teacherProfileId, profileId));
+  const sectionIds = Array.from(new Set(assigns.map(a => a.classSectionId)));
+  const subjectIds = new Set(assigns.map(a => a.subjectId));
+  const sections = sectionIds.length
+    ? await db.select({ id: classSection.id, gradeLevelId: classSection.gradeLevelId }).from(classSection).where(inArray(classSection.id, sectionIds as any))
+    : [];
+  const gradeLevelIds = new Set(sections.map(s => s.gradeLevelId).filter(Boolean) as string[]);
+  return { subjectIds, sectionIds: new Set(sectionIds), gradeLevelIds };
+}
+
+function isTeacher(roles: string[]) {
+  return roles.includes('TEACHER') && !(roles.includes('ADMIN') || roles.includes('STAFF'));
+}
+
 async function studentMatchesQuiz(studentProfileId: string, quizId: string) {
   const aud = await db.select().from(quizAudience).where(eq(quizAudience.quizId, quizId));
   if (!aud.length) return false;
@@ -94,10 +113,17 @@ async function studentMatchesQuiz(studentProfileId: string, quizId: string) {
 }
 
 // Question bank
-router.post('/questions', requireAuth, requireStaffOrAdmin, validate(UpsertQuestionDto), async (req, res) => {
+router.post('/questions', requireAuth, requireTeacherOrStaff, validate(UpsertQuestionDto), async (req, res) => {
   try {
     const viewer = await viewerFromReq(req);
     const body = req.body as z.infer<typeof UpsertQuestionDto>;
+
+    // TEACHER scoping: must specify subject they teach
+    if (isTeacher(viewer.roles)) {
+      if (!body.subjectId) return res.status(400).json({ error: 'subjectId is required for teacher' });
+      const scope = await teacherScope(viewer.profileId);
+      if (!scope.subjectIds.has(body.subjectId)) return res.status(403).json({ error: 'Not allowed for this subject' });
+    }
     const rows = await db.insert(question).values({
       type: body.type as any,
       subjectId: body.subjectId ?? null,
@@ -158,13 +184,22 @@ router.get('/questions', requireAuth, async (req, res) => {
 });
 
 // Update question (replace translations and options)
-router.patch('/questions/:id', requireAuth, requireStaffOrAdmin, validate(UpsertQuestionDto), async (req, res) => {
+router.patch('/questions/:id', requireAuth, requireTeacherOrStaff, validate(UpsertQuestionDto), async (req, res) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const body = req.body as z.infer<typeof UpsertQuestionDto>;
 
     const [existing] = await db.select().from(question).where(eq(question.id, id));
     if (!existing) return res.status(404).json({ error: 'Question not found' });
+
+    const viewer = await viewerFromReq(req);
+    if (isTeacher(viewer.roles)) {
+      if (existing.createdByProfileId !== viewer.profileId) return res.status(403).json({ error: 'Not owner' });
+      if (body.subjectId) {
+        const scope = await teacherScope(viewer.profileId);
+        if (!scope.subjectIds.has(body.subjectId)) return res.status(403).json({ error: 'Not allowed for this subject' });
+      }
+    }
 
     await db.transaction(async (tx) => {
       // Update base question fields
@@ -212,10 +247,32 @@ router.patch('/questions/:id', requireAuth, requireStaffOrAdmin, validate(Upsert
 });
 
 // Create quiz
-router.post('/quizzes', requireAuth, requireStaffOrAdmin, validate(CreateQuizDto), async (req, res) => {
+router.post('/quizzes', requireAuth, requireTeacherOrStaff, validate(CreateQuizDto), async (req, res) => {
   try {
     const viewer = await viewerFromReq(req);
     const body = req.body as z.infer<typeof CreateQuizDto>;
+
+    // TEACHER scoping
+    if (isTeacher(viewer.roles)) {
+      if (!body.subjectId) return res.status(400).json({ error: 'subjectId is required for teacher' });
+      const scope = await teacherScope(viewer.profileId);
+      if (!scope.subjectIds.has(body.subjectId)) return res.status(403).json({ error: 'Not allowed for this subject' });
+      // Validate audience
+      for (const a of body.audience || []) {
+        if (a.scope === 'ALL') return res.status(400).json({ error: 'Teachers cannot target ALL' });
+        if (a.scope === 'SUBJECT' && a.subjectId && !scope.subjectIds.has(a.subjectId)) return res.status(403).json({ error: 'Audience subject not allowed' });
+        if (a.scope === 'CLASS_SECTION' && a.classSectionId && !scope.sectionIds.has(a.classSectionId)) return res.status(403).json({ error: 'Audience section not allowed' });
+        if (a.scope === 'GRADE_LEVEL' && a.gradeLevelId && !scope.gradeLevelIds.has(a.gradeLevelId)) return res.status(403).json({ error: 'Audience grade not allowed' });
+      }
+      // Validate questions belong to allowed subject(s)
+      if (body.questions?.length) {
+        const ids = body.questions.map(q => q.questionId);
+        const rows = await db.select({ id: question.id, subjectId: question.subjectId, createdByProfileId: question.createdByProfileId })
+          .from(question).where(inArray(question.id, ids as any));
+        const ok = rows.every(r => (r.subjectId ? scope.subjectIds.has(r.subjectId) : r.createdByProfileId === viewer.profileId));
+        if (!ok) return res.status(403).json({ error: 'One or more questions not allowed' });
+      }
+    }
     const rows = await db.insert(quiz).values({
       createdByProfileId: viewer.profileId,
       subjectId: body.subjectId ?? null,
@@ -252,12 +309,34 @@ router.post('/quizzes', requireAuth, requireStaffOrAdmin, validate(CreateQuizDto
 });
 
 // Update quiz
-router.patch('/quizzes/:id', requireAuth, requireStaffOrAdmin, validate(UpdateQuizDto), async (req, res) => {
+router.patch('/quizzes/:id', requireAuth, requireTeacherOrStaff, validate(UpdateQuizDto), async (req, res) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const body = req.body as z.infer<typeof UpdateQuizDto>;
     const [existing] = await db.select().from(quiz).where(eq(quiz.id, id));
     if (!existing) return res.status(404).json({ error: 'Quiz not found' });
+
+    const viewer = await viewerFromReq(req);
+    if (isTeacher(viewer.roles)) {
+      if (existing.createdByProfileId !== viewer.profileId) return res.status(403).json({ error: 'Not owner' });
+      const scope = await teacherScope(viewer.profileId);
+      if (body.subjectId && !scope.subjectIds.has(body.subjectId)) return res.status(403).json({ error: 'Not allowed for this subject' });
+      if (body.audience) {
+        for (const a of body.audience) {
+          if (a.scope === 'ALL') return res.status(400).json({ error: 'Teachers cannot target ALL' });
+          if (a.scope === 'SUBJECT' && a.subjectId && !scope.subjectIds.has(a.subjectId)) return res.status(403).json({ error: 'Audience subject not allowed' });
+          if (a.scope === 'CLASS_SECTION' && a.classSectionId && !scope.sectionIds.has(a.classSectionId)) return res.status(403).json({ error: 'Audience section not allowed' });
+          if (a.scope === 'GRADE_LEVEL' && a.gradeLevelId && !scope.gradeLevelIds.has(a.gradeLevelId)) return res.status(403).json({ error: 'Audience grade not allowed' });
+        }
+      }
+      if (body.questions?.length) {
+        const ids = body.questions.map(q => q.questionId);
+        const rows = await db.select({ id: question.id, subjectId: question.subjectId, createdByProfileId: question.createdByProfileId })
+          .from(question).where(inArray(question.id, ids as any));
+        const ok = rows.every(r => (r.subjectId ? scope.subjectIds.has(r.subjectId) : r.createdByProfileId === viewer.profileId));
+        if (!ok) return res.status(403).json({ error: 'One or more questions not allowed' });
+      }
+    }
 
     await db.transaction(async (tx) => {
       if (body.translations) {
@@ -299,12 +378,16 @@ router.patch('/quizzes/:id', requireAuth, requireStaffOrAdmin, validate(UpdateQu
 });
 
 // Publish or unpublish
-router.post('/quizzes/:id/publish', requireAuth, requireStaffOrAdmin, validate(PublishDto), async (req, res) => {
+router.post('/quizzes/:id/publish', requireAuth, requireTeacherOrStaff, validate(PublishDto), async (req, res) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const { publish } = req.body as z.infer<typeof PublishDto>;
     const [existing] = await db.select().from(quiz).where(eq(quiz.id, id));
     if (!existing) return res.status(404).json({ error: 'Quiz not found' });
+    const viewer = await viewerFromReq(req);
+    if (isTeacher(viewer.roles) && existing.createdByProfileId !== viewer.profileId) {
+      return res.status(403).json({ error: 'Not owner' });
+    }
     const status = publish ? 'PUBLISHED' : 'DRAFT';
     await db.update(quiz).set({ status: status as any, updatedAt: new Date() }).where(eq(quiz.id, id));
 
@@ -320,12 +403,23 @@ router.post('/quizzes/:id/publish', requireAuth, requireStaffOrAdmin, validate(P
   }
 });
 
+function resolveLocale(req: express.Request) {
+  // Prefer explicit query param, else derive from Accept-Language, default to 'fr'
+  const qloc = typeof req.query.locale === 'string' ? req.query.locale : undefined;
+  if (qloc && ['fr','en','ar'].includes(qloc)) return qloc;
+  const al = req.get('accept-language') || '';
+  const first = al.split(',')[0]?.trim().slice(0,2).toLowerCase();
+  if (first && ['fr','en','ar'].includes(first)) return first;
+  return 'fr';
+}
+
 // List available quizzes for students (with audience + window + attempts)
 router.get('/quizzes/available', requireAuth, async (req, res) => {
   try {
     const viewer = await viewerFromReq(req);
     const parsed = ListAvailableQuery.safeParse(req.query);
     const nowDate = parsed.success && parsed.data.now ? parsed.data.now : (req.query.now ? new Date(String(req.query.now)) : new Date());
+    const locale = resolveLocale(req);
 
     const rows = await db.select().from(quiz)
       .where(eq(quiz.status, 'PUBLISHED' as any))
@@ -343,7 +437,34 @@ router.get('/quizzes/available', requireAuth, async (req, res) => {
       if (filtered.length >= 50) break;
     }
 
-    res.json(filtered.map(q => ({ id: q.id, openAt: q.openAt, closeAt: q.closeAt })));
+    // Enrich with localized title and attempts remaining
+    const result = [] as Array<{
+      id: string;
+      title?: string | null;
+      timeLimitSec?: number | null;
+      attemptsRemaining?: number;
+      openAt: Date | null;
+      closeAt: Date | null;
+    }>;
+    for (const q of filtered) {
+      let title: string | null | undefined = null;
+      try {
+        const [tr] = await db.select().from(quizTranslation)
+          .where(and(eq(quizTranslation.quizId, q.id), eq(quizTranslation.locale, locale as any)));
+        title = (tr?.title as string) ?? null;
+      } catch {}
+      const rem = await attemptsRemaining(q.id, viewer.profileId, q.maxAttempts ?? 1);
+      result.push({
+        id: q.id,
+        title,
+        timeLimitSec: q.timeLimitSec ?? null,
+        attemptsRemaining: rem,
+        openAt: q.openAt,
+        closeAt: q.closeAt,
+      });
+    }
+
+    res.json(result);
   } catch (e: any) {
     res.status(400).json({ error: e.message ?? 'Bad request' });
   }
@@ -508,11 +629,63 @@ router.post('/attempts/:id/finish', requireAuth, async (req, res) => {
 });
 
 // Teacher: list submissions for a quiz
-router.get('/teacher/quizzes/:id/submissions', requireAuth, requireStaffOrAdmin, async (req, res) => {
+router.get('/teacher/quizzes/:id/submissions', requireAuth, requireTeacherOrStaff, async (req, res) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
+    const viewer = await viewerFromReq(req);
+    if (isTeacher(viewer.roles)) {
+      const [qz] = await db.select().from(quiz).where(eq(quiz.id, id));
+      if (!qz || qz.createdByProfileId !== viewer.profileId) return res.status(403).json({ error: 'Not owner' });
+    }
     const rows = await db.select().from(quizAttempt).where(eq(quizAttempt.quizId, id));
     res.json(rows);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message ?? 'Bad request' });
+  }
+});
+
+// CSV export for submissions
+router.get('/teacher/quizzes/:id/submissions.csv', requireAuth, requireTeacherOrStaff, async (req, res) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const viewer = await viewerFromReq(req);
+    if (isTeacher(viewer.roles)) {
+      const [qz] = await db.select().from(quiz).where(eq(quiz.id, id));
+      if (!qz || qz.createdByProfileId !== viewer.profileId) return res.status(403).json({ error: 'Not owner' });
+    }
+    const rows = await db.select({
+      id: quizAttempt.id,
+      studentProfileId: quizAttempt.studentProfileId,
+      status: quizAttempt.status,
+      score: quizAttempt.score,
+      maxScore: quizAttempt.maxScore,
+      submittedAt: quizAttempt.submittedAt,
+    }).from(quizAttempt).where(eq(quizAttempt.quizId, id));
+
+    // Lookup student names
+    const profIds = Array.from(new Set(rows.map(r => r.studentProfileId)));
+    const profs = profIds.length ? await db.select({ id: profiles.id, firstName: profiles.firstName, lastName: profiles.lastName })
+      .from(profiles).where(inArray(profiles.id, profIds as any)) : [];
+    const nameMap = new Map(profs.map(p => [p.id, `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim()] as const));
+
+    const header = ['attempt_id','student_profile_id','student_name','status','score','max_score','submitted_at'];
+    const lines = [header.join(',')];
+    for (const r of rows) {
+      const line = [
+        r.id,
+        r.studentProfileId,
+        nameMap.get(r.studentProfileId) ?? '',
+        String(r.status),
+        r.score ? String(r.score) : '',
+        r.maxScore ? String(r.maxScore) : '',
+        r.submittedAt ? new Date(r.submittedAt).toISOString() : '',
+      ].map(v => (v?.includes?.(',') ? '"' + v.replace(/"/g,'""') + '"' : v)).join(',');
+      lines.push(line);
+    }
+    const csv = lines.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="quiz_${id}_submissions.csv"`);
+    res.send(csv);
   } catch (e: any) {
     res.status(400).json({ error: e.message ?? 'Bad request' });
   }
@@ -661,3 +834,25 @@ router.get('/attempts/:id', requireAuth, async (req, res) => {
 });
 
 export default router;
+
+// Additional: Teacher quizzes listing
+router.get('/teacher/quizzes', requireAuth, requireTeacherOrStaff, async (req, res) => {
+  try {
+    const viewer = await viewerFromReq(req);
+    const locale = resolveLocale(req);
+    // For now, return only quizzes created by current user (even for staff/admin)
+    const rows = await db.select().from(quiz)
+      .where(eq(quiz.createdByProfileId, viewer.profileId))
+      .orderBy(desc(quiz.createdAt))
+      .limit(200);
+    const out = [] as any[];
+    for (const q of rows) {
+      const [tr] = await db.select().from(quizTranslation)
+        .where(and(eq(quizTranslation.quizId, q.id), eq(quizTranslation.locale, locale as any)));
+      out.push({ id: q.id, status: q.status, timeLimitSec: q.timeLimitSec, openAt: q.openAt, closeAt: q.closeAt, title: (tr?.title as string) ?? null });
+    }
+    res.json(out);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message ?? 'Bad request' });
+  }
+});

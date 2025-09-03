@@ -10,6 +10,9 @@ import { searchRouter } from '../modules/admin-utils/search.routes';
 import { filesRouter } from '../modules/content/files.routes';
 import { notesRouter } from '../modules/content/notes.routes';
 import assessmentsRouter from '../modules/assessments/routes.ts';
+import { messagesRouter } from '../modules/messages/routes.ts';
+import { disciplineRouter } from '../modules/discipline/routes.ts';
+import { financeRouter } from '../modules/finance/routes.ts';
 
 const router = Router();
 
@@ -24,5 +27,8 @@ router.use('/admin/search', searchRouter);
 router.use('/content', filesRouter);
 router.use('/content', notesRouter);
 router.use('/assessments', assessmentsRouter);
+router.use('/messages', messagesRouter);
+router.use('/', disciplineRouter);
+router.use('/', financeRouter);
 
 export default router;

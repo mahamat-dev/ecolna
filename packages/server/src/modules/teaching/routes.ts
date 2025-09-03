@@ -3,10 +3,10 @@ import { db } from '../../db/client';
 import { validate } from '../../middlewares/validate';
 import { requireAdmin, requireAuth } from '../../middlewares/rbac';
 import { userRoles, profiles } from '../../db/schema/identity';
-import { term, academicYear, classSection, subject } from '../../db/schema/academics';
+import { term, academicYear, classSection, subject, gradeLevel } from '../../db/schema/academics';
 import { teachingAssignment } from '../../db/schema/teaching';
 import { CreateAssignmentDto, UpdateAssignmentDto } from './dto';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, inArray } from 'drizzle-orm';
 import { writeAudit, actorFromReq } from '../../utils/audit';
 
 const router = Router();
@@ -28,6 +28,54 @@ async function ensureTermInYear(termId?: string | null, yearId?: string) {
     throw Object.assign(new Error('termId must belong to academicYearId'), { status: 400 });
   }
 }
+
+// Lightweight identity helper for non-admin teacher self queries
+async function viewerFromReq(req: any) {
+  const sess = req.session as any;
+  const userId: string | undefined = sess?.user?.id;
+  if (!userId) throw Object.assign(new Error('Not authenticated'), { status: 401 });
+  const [profile] = await db.select().from(profiles).where(eq(profiles.userId, userId));
+  if (!profile) throw Object.assign(new Error('Profile not found'), { status: 400 });
+  return { userId, profileId: profile.id };
+}
+
+// Public (auth) endpoint for teachers to see their assignments
+router.get('/assignments/me', requireAuth, async (req, res) => {
+  try {
+    const viewer = await viewerFromReq(req);
+    const rows = await db.select({
+      id: teachingAssignment.id,
+      classSectionId: teachingAssignment.classSectionId,
+      subjectId: teachingAssignment.subjectId,
+      academicYearId: teachingAssignment.academicYearId,
+      termId: teachingAssignment.termId,
+      isLead: teachingAssignment.isLead,
+      isHomeroom: teachingAssignment.isHomeroom,
+    }).from(teachingAssignment).where(eq(teachingAssignment.teacherProfileId, viewer.profileId));
+
+    // Enrich with gradeLevelId using classSection
+    const sectionIds = Array.from(new Set(rows.map(r => r.classSectionId)));
+    const sections = sectionIds.length ? await db.select({ id: classSection.id, gradeLevelId: classSection.gradeLevelId, name: classSection.name })
+      .from(classSection).where(inArray(classSection.id, sectionIds as any)) : [];
+    const sectionMap = new Map(sections.map(s => [s.id, s] as const));
+    const gradeIds = Array.from(new Set(sections.map(s => s.gradeLevelId).filter(Boolean) as string[]));
+    const grades = gradeIds.length ? await db.select({ id: gradeLevel.id, name: gradeLevel.name }).from(gradeLevel).where(inArray(gradeLevel.id, gradeIds as any)) : [];
+    const gradeMap = new Map(grades.map(g => [g.id, g.name] as const));
+    const subjIds = Array.from(new Set(rows.map(r => r.subjectId).filter(Boolean) as string[]));
+    const subjs = subjIds.length ? await db.select({ id: subject.id, name: subject.name }).from(subject).where(inArray(subject.id, subjIds as any)) : [];
+    const subjMap = new Map(subjs.map(s => [s.id, s.name] as const));
+
+    res.json(rows.map(r => ({
+      ...r,
+      gradeLevelId: sectionMap.get(r.classSectionId)?.gradeLevelId ?? null,
+      classSectionName: sectionMap.get(r.classSectionId)?.name ?? null,
+      gradeLevelName: (sectionMap.get(r.classSectionId)?.gradeLevelId ? gradeMap.get(sectionMap.get(r.classSectionId)!.gradeLevelId!) : null) ?? null,
+      subjectName: r.subjectId ? (subjMap.get(r.subjectId) ?? null) : null,
+    })));
+  } catch (e: any) {
+    res.status(e.status ?? 400).json({ error: { message: e.message ?? 'Bad request' } });
+  }
+});
 
 async function enforceLeadUniqueness(sectionId: string, subjectId: string, termId: string | null, makeLead: boolean, assignmentIdToSkip?: string) {
   if (!makeLead) return;

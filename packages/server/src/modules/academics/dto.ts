@@ -101,3 +101,35 @@ export const UpdateClassSectionDto = z.object({
 export const SetSectionSubjectsDto = z.object({
   subjectIds: z.array(z.string().uuid()).min(0),
 });
+
+// Timetable DTOs (Module 9)
+
+export const CreatePeriodDto = z.object({
+  label: z.string().min(1).max(64),
+  startsAt: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/),
+  endsAt: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/),
+});
+
+export const CreateSlotDto = z.object({
+  classSectionId: z.string().uuid(),
+  subjectId: z.string().uuid(),
+  teacherProfileId: z.string().uuid(),
+  dayOfWeek: z.number().int().min(1).max(7),
+  periodId: z.string().uuid(),
+  room: z.string().max(64).optional(),
+  validFrom: z.coerce.date().optional(),
+  validTo: z.coerce.date().nullable().optional(),
+});
+
+export const UpdSlotDto = CreateSlotDto.partial();
+
+export const AddExceptionDto = z.object({
+  classSectionId: z.string().uuid(),
+  date: z.coerce.date(),
+  canceled: z.boolean().default(true),
+  note: z.string().max(1000).optional(),
+});
+
+export const TimetableQuery = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});

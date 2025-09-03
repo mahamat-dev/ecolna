@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useSubmissions } from '../../hooks';
 import type { SubmissionSummary } from '../../types';
+import { API_URL } from '@/lib/env';
 
 export default function SubmissionsPage() {
   const { quizId } = useParams();
@@ -25,9 +26,19 @@ export default function SubmissionsPage() {
           <h1 className="text-2xl font-semibold">Quiz Submissions</h1>
           <p className="text-gray-600">Quiz ID: {quizId}</p>
         </div>
-        <Button onClick={() => refetch()} disabled={isLoading}>
-          {isLoading ? 'Refreshing...' : 'Refresh'}
-        </Button>
+        <div className="flex items-center gap-2">
+          <a
+            href={`${API_URL}/assessments/teacher/quizzes/${quizId}/submissions.csv`}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded border px-3 py-2 text-sm hover:bg-gray-50"
+          >
+            Export CSV
+          </a>
+          <Button onClick={() => refetch()} disabled={isLoading}>
+            {isLoading ? 'Refreshing...' : 'Refresh'}
+          </Button>
+        </div>
       </div>
 
       <div className="overflow-x-auto">
